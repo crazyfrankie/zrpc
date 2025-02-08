@@ -3,11 +3,11 @@ package zrpc
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/crazyfrankie/zrpc/codec"
@@ -27,7 +27,8 @@ var DefaultOption = &Option{
 
 // Server represents an RPC Server.
 type Server struct {
-	mu sync.Mutex
+	mu         sync.Mutex
+	serviceMap sync.Map
 }
 
 // NewServer returns a new rpc server
@@ -37,6 +38,17 @@ func NewServer() *Server {
 
 // DefaultServer is the default instance of *Server.
 var DefaultServer = NewServer()
+
+func (s *Server) Register(receiver any) error {
+	svc := newService(receiver)
+	if _, dup := s.serviceMap.LoadOrStore(svc.name, svc); dup {
+		return errors.New("rpc: service already defined: " + svc.name)
+	}
+	return nil
+}
+
+// Register publishes the receiver's methods in the DefaultServer.
+func Register(receiver interface{}) error { return DefaultServer.Register(receiver) }
 
 // Accept accepts connections on the listener and serves requests
 // for each incoming connection.
@@ -50,6 +62,29 @@ func (s *Server) Accept(listener net.Listener) {
 
 		go s.ServeConn(conn)
 	}
+}
+
+func (s *Server) findService(method string) (*service, *methodType, error) {
+	var err error
+	dot := strings.LastIndex(method, ".")
+	if dot < 0 {
+		err = errors.New("rpc server: service/method request ill-formed: " + method)
+		return nil, nil, err
+	}
+
+	serviceName, methodName := method[:dot], method[dot+1:]
+	svci, ok := s.serviceMap.Load(serviceName)
+	if !ok {
+		err = errors.New("rpc server: can't find service " + serviceName)
+		return nil, nil, err
+	}
+	svc := svci.(*service)
+	mType := svc.method[methodName]
+	if mType == nil {
+		err = errors.New("rpc server: can't find method " + methodName)
+	}
+
+	return svc, mType, nil
 }
 
 func Accept(listener net.Listener) {
@@ -82,6 +117,8 @@ type request struct {
 	h        *codec.Header // header of request
 	argVal   reflect.Value // argVal of request
 	replyVal reflect.Value // replyVal of request
+	mType    *methodType
+	svc      *service
 }
 
 // invalidRequest is a placeholder for response argv when error occurs
@@ -104,10 +141,12 @@ func (s *Server) ServeCodec(cc codec.Codec) {
 
 		// handleRequest
 		go func() {
-			// TODO, should call registered rpc methods to get the right replyVal
-			// day 1, just print argv and send a hello message
-			log.Println(req.h, req.argVal.Elem())
-			req.replyVal = reflect.ValueOf(fmt.Sprintf("zrpc resp %d", req.h.Seq))
+			req.replyVal, err = req.svc.call(req.mType, req.argVal)
+			if err != nil {
+				req.h.Err = err.Error()
+				s.sendResponse(cc, req.h, invalidRequest)
+				return
+			}
 			s.sendResponse(cc, req.h, req.replyVal.Interface())
 			wg.Done()
 		}()
@@ -124,9 +163,19 @@ func (s *Server) readRequest(cc codec.Codec) (*request, error) {
 	}
 
 	req := &request{h: h}
-	// TODO: now we don't know the type of request argv
-	req.argVal = reflect.New(reflect.TypeOf(""))
-	if err = cc.ReadBody(req.argVal.Interface()); err != nil {
+	req.svc, req.mType, err = s.findService(h.ServiceName)
+	if err != nil {
+		return req, err
+	}
+	req.argVal = req.mType.newArgv()
+	req.replyVal = req.mType.newReplyVal()
+
+	// make sure that argv is a pointer, ReadBody need a pointer as parameter
+	argv := req.argVal.Interface()
+	if req.argVal.Type().Kind() != reflect.Ptr {
+		argv = req.argVal.Addr().Interface()
+	}
+	if err = cc.ReadBody(argv); err != nil {
 		log.Println("rpc server: read argv err:", err)
 	}
 	return req, nil
