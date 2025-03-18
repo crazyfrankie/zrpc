@@ -1,22 +1,16 @@
-package zrpc
+package server
 
 import (
 	"context"
 	"go/ast"
 	"log"
 	"reflect"
-	"sync/atomic"
 )
 
 type methodType struct {
 	method    reflect.Method
 	ArgType   reflect.Type
 	ReplyType reflect.Type
-	numCalls  uint64
-}
-
-func (m *methodType) NumCalls() uint64 {
-	return atomic.LoadUint64(&m.numCalls)
 }
 
 func (m *methodType) newArgv() reflect.Value {
@@ -58,7 +52,6 @@ func newService(receiver any) *service {
 }
 
 func (s *service) call(m *methodType, argv reflect.Value) (reflect.Value, error) {
-	atomic.AddUint64(&m.numCalls, 1)
 	f := m.method.Func
 	ctx := reflect.ValueOf(context.Background())
 	returnValues := f.Call([]reflect.Value{s.receiver, ctx, argv})

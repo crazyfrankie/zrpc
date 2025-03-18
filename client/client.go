@@ -1,10 +1,11 @@
-package zrpc
+package client
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/crazyfrankie/zrpc/server"
 	"io"
 	"log"
 	"net"
@@ -33,7 +34,7 @@ func (c *CallInfo) done() {
 // multiple goroutines simultaneously.
 type Client struct {
 	cc      codec.Codec
-	opt     *Option
+	opt     *server.Option
 	sending sync.Mutex // protect header
 	header  codec.Header
 	mu      sync.Mutex // protect seq and pending
@@ -138,7 +139,7 @@ func (c *Client) terminateCalls(err error) {
 	}
 }
 
-func NewClient(conn net.Conn, opt *Option) (*Client, error) {
+func NewClient(conn net.Conn, opt *server.Option) (*Client, error) {
 	f := codec.NewCodecFuncMap[opt.CodecType]
 	if f == nil {
 		err := fmt.Errorf("invalid codec type %s", opt.CodecType)
@@ -155,7 +156,7 @@ func NewClient(conn net.Conn, opt *Option) (*Client, error) {
 	return newClientCodec(f(conn), opt), nil
 }
 
-func newClientCodec(cc codec.Codec, opt *Option) *Client {
+func newClientCodec(cc codec.Codec, opt *server.Option) *Client {
 	client := &Client{
 		cc:      cc,
 		seq:     1, // seq starts with 1, 0 means invalid call
@@ -167,7 +168,7 @@ func newClientCodec(cc codec.Codec, opt *Option) *Client {
 	return client
 }
 
-func parseOptions(opts ...*Option) (*Option, error) {
+func parseOptions(opts ...*server.Option) (*server.Option, error) {
 	// if opts is nil or pass nil as parameter
 	if len(opts) == 0 || opts[0] == nil {
 		return DefaultOption, nil
@@ -184,7 +185,7 @@ func parseOptions(opts ...*Option) (*Option, error) {
 }
 
 // Dial connects to an RPC server at the specified network address
-func Dial(network, address string, opts ...*Option) (client *Client, err error) {
+func Dial(network, address string, opts ...*server.Option) (client *Client, err error) {
 	opt, err := parseOptions(opts...)
 	if err != nil {
 		return nil, err
