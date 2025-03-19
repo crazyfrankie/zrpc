@@ -8,18 +8,32 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/crazyfrankie/zrpc/codec"
+	"github.com/crazyfrankie/zrpc/metadata"
+	"github.com/crazyfrankie/zrpc/protocol"
+	"github.com/crazyfrankie/zrpc/share"
 )
 
 const (
 	ReadBufferSize = 1024
 )
+
+// MethodHandler is a function type that processes a unary RPC method call.
+type MethodHandler func(srv any, ctx context.Context, dec func(any) error) (any, error)
+
+// MethodDesc represents an RPC service's method specification.
+type MethodDesc struct {
+	MethodName string
+	Handler    MethodHandler
+}
 
 // Server represents an RPC Server.
 type Server struct {
@@ -30,8 +44,9 @@ type Server struct {
 	serviceMap sync.Map       // service name -> service info
 	serveWG    sync.WaitGroup // counts active Serve goroutines for Stop/GracefulStop
 
-	inShutdown int32
-	quit       chan struct{}
+	handleMsgCount int32
+	inShutdown     int32
+	done           chan struct{}
 }
 
 // NewServer returns a new rpc server
@@ -44,7 +59,7 @@ func NewServer(opts ...Option) *Server {
 	return &Server{
 		opt:   opt,
 		conns: make(map[net.Conn]struct{}),
-		quit:  make(chan struct{}),
+		done:  make(chan struct{}),
 	}
 }
 
@@ -88,7 +103,7 @@ func (s *Server) serveListener(lis net.Listener) error {
 				timer := time.NewTimer(tempDelay)
 				select {
 				case <-timer.C:
-				case <-s.quit:
+				case <-s.done:
 					timer.Stop()
 					return nil
 				}
@@ -103,7 +118,7 @@ func (s *Server) serveListener(lis net.Listener) error {
 
 		s.serveWG.Add(1)
 		go func() {
-			s.serveConn(conn)
+			s.serveConn(context.Background(), conn)
 			s.serveWG.Done()
 		}()
 	}
@@ -111,13 +126,29 @@ func (s *Server) serveListener(lis net.Listener) error {
 
 // serveConn runs the server on a single connection.
 // serveConn blocks, serving the connection until the client hangs up.
-func (s *Server) serveConn(conn net.Conn) {
+func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
+	ctx = SetConnection(ctx, conn)
 	if s.isShutDown() {
 		s.removeConn(conn)
 		return
 	}
+
 	defer func() {
-		// TODO
+		if err := recover(); err != nil {
+			const size = 64 << 10
+			buf := make([]byte, size)
+			ss := runtime.Stack(buf, false)
+			if ss > size {
+				ss = size
+			}
+			buf = buf[:ss]
+			zap.L().Error(fmt.Sprintf("serving %s panic error: %s, stack:\n %s", conn.RemoteAddr(), err, buf))
+		}
+
+		// make sure all inflight requests are handled and all drained
+		if s.isShutDown() {
+			<-s.done
+		}
 
 		s.removeConn(conn)
 	}()
@@ -135,9 +166,8 @@ func (s *Server) serveConn(conn net.Conn) {
 		}
 	}
 
-	// r := bufio.NewReaderSize(conn, ReadBufferSize)
+	r := bufio.NewReaderSize(conn, ReadBufferSize)
 
-	// TODO
 	// read requests and handle it
 	for {
 		if s.isShutDown() {
@@ -148,54 +178,168 @@ func (s *Server) serveConn(conn net.Conn) {
 		if s.opt.readTimeout != 0 {
 			conn.SetReadDeadline(now.Add(s.opt.readTimeout))
 		}
-	}
-	//var opt Option
-	//if err := json.NewDecoder(conn).Decode(&opt); err != nil {
-	//	log.Println("rpc server: options error:", err.Error())
-	//	return
-	//}
-	//if opt.MagicNumber != MagicNumber {
-	//	log.Printf("rpc server: invalid magic number:%x", opt.MagicNumber)
-	//	return
-	//}
-	//f := codec.NewCodecFuncMap[opt.CodecType]
-	//if f == nil {
-	//	log.Printf("rpc server invalid codec type:%s", opt.CodecType)
-	//	return
-	//}
 
-	//s.ServeCodec(f(conn))
+		req, err := s.readRequest(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				zap.L().Info("client has closed the connection:", zap.String("addr", conn.RemoteAddr().String()))
+			} else if errors.Is(err, net.ErrClosed) {
+				zap.L().Info("zrpc: connection is closed:", zap.String("addr", conn.RemoteAddr().String()))
+			} else { // wrong data
+				zap.L().Warn("rpcx: failed to read request: ", zap.String("err", err.Error()))
+			}
+
+			return
+		}
+
+		// inject metadata to context
+		ctx = metadata.NewInComingContext(req.Metadata)
+		closeConn := false
+		if !req.IsHeartBeat() {
+			err = s.auth(ctx, req)
+			closeConn = err != nil
+		}
+
+		if err != nil {
+			res := req.Clone()
+			res.SetMessageType(protocol.Response)
+			s.handleError(res, err)
+			s.sendResponse(conn, err, req, res, nil)
+
+			// auth failed, closed the connection
+			if closeConn {
+				zap.L().Info("auth failed for conn:", zap.String("addr", conn.RemoteAddr().String()), zap.Error(err))
+				return
+			}
+			continue
+		}
+
+		go s.processOneRequest(ctx, req, conn)
+	}
 }
 
-func (s *Server) Register(receiver any) error {
-	svc := newService(receiver)
-	if _, dup := s.serviceMap.LoadOrStore(svc.name, svc); dup {
-		return errors.New("rpc: service already defined: " + svc.name)
+func (s *Server) readRequest(r io.Reader) (*protocol.Message, error) {
+	req := protocol.NewMessage()
+	err := req.Decode(r, s.opt.maxReceiveMessageSize)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if err == io.EOF {
+		return req, err
+	}
+	return req, err
 }
 
-func (s *Server) findService(method string) (*service, *methodType, error) {
+func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, conn net.Conn) {
+	defer func() {
+		if r := recover(); r != nil {
+			buf := make([]byte, 1024)
+			buf = buf[:runtime.Stack(buf, true)]
+			zap.L().Error(fmt.Sprintf("[handler internal error]: servicepath: %s, servicemethod: %s, err: %v，stacks: %s", req.ServiceName, req.ServiceMethod, r, string(buf)))
+		}
+	}()
+
+	atomic.AddInt32(&s.handleMsgCount, 1)
+	defer atomic.AddInt32(&s.handleMsgCount, -1)
+
+	// if heartbeat return directly
+	if req.IsHeartBeat() {
+		res := req.Clone()
+		res.SetMessageType(protocol.Response)
+		data := req.Encode()
+
+		if s.opt.writeTimeout != 0 {
+			conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
+		}
+		conn.Write(*data)
+	}
+
 	var err error
-	dot := strings.LastIndex(method, ".")
-	if dot < 0 {
-		err = errors.New("rpc server: service/method request ill-formed: " + method)
-		return nil, nil, err
-	}
-
-	serviceName, methodName := method[:dot], method[dot+1:]
-	svci, ok := s.serviceMap.Load(serviceName)
+	var reply any
+	// get service
+	svc, ok := s.serviceMap.Load(req.ServiceName)
+	srv, _ := svc.(*service)
 	if !ok {
-		err = errors.New("rpc server: can't find service " + serviceName)
-		return nil, nil, err
+		err = errors.New("rpcx: can't find service " + req.ServiceName)
 	}
-	svc := svci.(*service)
-	mType := svc.method[methodName]
-	if mType == nil {
-		err = errors.New("rpc server: can't find method " + methodName)
+	d := codec.GetBufferSliceFromRequest(req)
+	res := req.Clone()
+	if md, ok := srv.method[req.ServiceMethod]; ok {
+		res.SetMessageType(protocol.Response)
+
+		df := func(v any) error {
+			if err := s.getCodec().Unmarshal(d, v); err != nil {
+				return fmt.Errorf("zrpc: error unmarshalling request: %v", err)
+			}
+
+			// TODO
+			// StatsHandler
+
+			return nil
+		}
+		ctx = context.WithValue(ctx, responseKey{}, res)
+
+		reply, err = md.Handler(srv.serviceImpl, ctx, df)
+		if err != nil {
+			s.handleError(res, err)
+		}
+		if err != nil {
+			zap.L().Error("rpcx: failed to handle request: ", zap.Error(err))
+		}
 	}
 
-	return svc, mType, nil
+	s.sendResponse(conn, err, req, res, reply)
+}
+
+func (s *Server) sendResponse(conn net.Conn, err error, req, res *protocol.Message, reply any) {
+	d, appErr := s.getCodec().Marshal(reply)
+	if appErr != nil {
+		err = appErr
+	}
+	defer codec.PutBufferSlice(&d)
+	res.Payload = d.ToBytes()
+	if len(res.Payload) > 1024 && res.GetCompressType() != protocol.None {
+		res.SetCompressType(req.GetCompressType())
+	}
+
+	data := res.Encode()
+
+	go func() {
+		if s.opt.writeTimeout != 0 {
+			conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
+		}
+		_, writeErr := conn.Write(*data)
+		if writeErr != nil {
+			zap.L().Error("zrpc: failed to send response", zap.Error(writeErr))
+		}
+	}()
+}
+
+func (s *Server) handleError(res *protocol.Message, err error) {
+	res.SetMessageStatusType(protocol.Error)
+	var key, val string
+
+	key = protocol.ServiceError
+	if s.opt.ServerErrorFunc != nil {
+		val = s.opt.ServerErrorFunc(res, err)
+	} else {
+		val = err.Error()
+	}
+
+	if res.Metadata.Len() == 0 {
+		res.Metadata = metadata.New(map[string]string{key: val})
+	} else {
+		res.Metadata = metadata.Join(res.Metadata, metadata.Pairs(key, val))
+	}
+}
+
+func (s *Server) auth(ctx context.Context, req *protocol.Message) error {
+	if s.opt.AuthFunc != nil {
+		token := req.Metadata[share.AuthKey]
+		return s.opt.AuthFunc(ctx, req, token[0])
+	}
+
+	return nil
 }
 
 func (s *Server) GracefulStop() {
@@ -220,101 +364,27 @@ func (s *Server) removeConn(conn net.Conn) {
 	conn.Close()
 }
 
-func (s *Server) readRequest(ctx context.Context, r io.Reader) () {
-
+func (s *Server) getCodec() codec.Codec {
+	return codec.DefaultCodec
 }
 
-// request stores all information of a call
-//type request struct {
-//	h        *codec.Header // header of request
-//	argVal   reflect.Value // argVal of request
-//	replyVal reflect.Value // replyVal of request
-//	mType    *methodType
-//	svc      *service
-//}
-//
-//// invalidRequest is a placeholder for response argv when error occurs
-//var invalidRequest = struct{}{}
-//
-//func (s *Server) serveSteam(ctx context.Context, st *transport.TcpServer) {
-//	//var wg sync.WaitGroup
-//
-//	//for {
-//	//	req, err := s.readRequest(cc)
-//	//	if err != nil {
-//	//		if req == nil {
-//	//			break
-//	//		}
-//	//		req.h.Err = err.Error()
-//	//		s.sendResponse(cc, req.h, invalidRequest)
-//	//		continue
-//	//	}
-//	//	wg.Add(1)
-//	//
-//	//	// handleRequest
-//	//	go func() {
-//	//		req.replyVal, err = req.svc.call(req.mType, req.argVal)
-//	//		if err != nil {
-//	//			req.h.Err = err.Error()
-//	//			s.sendResponse(cc, req.h, invalidRequest)
-//	//			return
-//	//		}
-//	//		s.sendResponse(cc, req.h, req.replyVal.Interface())
-//	//		wg.Done()
-//	//	}()
-//	//}
-//	//
-//	//wg.Wait()
-//	//_ = cc.Close()
-//}
-//
-//func (s *Server) readRequest(cc codec.Codec) (*request, error) {
-//	h, err := s.readRequestHeader(cc)
-//	if err != nil {
-//		return nil, err
-//	}
-//
-//	req := &request{h: h}
-//	req.svc, req.mType, err = s.findService(h.ServiceName)
-//	if err != nil {
-//		return req, err
-//	}
-//	req.argVal = req.mType.newArgv()
-//	req.replyVal = req.mType.newReplyVal()
-//
-//	// make sure that argv is a pointer, ReadBody need a pointer as parameter
-//	argv := req.argVal.Interface()
-//	if req.argVal.Type().Kind() != reflect.Ptr {
-//		argv = req.argVal.Addr().Interface()
-//	}
-//	if err = cc.ReadBody(argv); err != nil {
-//		log.Println("rpc server: read argv err:", err)
-//	}
-//	return req, nil
-//}
-//
-//func (s *Server) readRequestHeader(cc codec.Codec) (*codec.Header, error) {
-//	var h codec.Header
-//	if err := cc.ReadHeader(&h); err != nil {
-//		if err != io.EOF && !errors.Is(err, io.ErrUnexpectedEOF) {
-//			log.Println("rpc server: read header error:", err)
-//		}
-//		return nil, err
-//	}
-//
-//	return &h, nil
-//}
-//
-//func (s *Server) sendResponse(cc codec.Codec, h *codec.Header, body interface{}) {
-//	s.mu.Lock()
-//	defer s.mu.Unlock()
-//	if err := cc.Write(h, body); err != nil {
-//		log.Println("rpc server: write response error:", err)
-//	}
-//}
-//
+type responseKey struct{}
+
+func SetHeader(ctx context.Context, md metadata.MD) error {
+	if md.Len() == 0 {
+		return nil
+	}
+
+	res, ok := ctx.Value(responseKey{}).(*protocol.Message)
+	if !ok {
+		return fmt.Errorf("zrpc failed to fetch response message from context: %v", ctx)
+	}
+
+	res.Metadata = metadata.Join(res.Metadata, md)
+	return nil
+}
+
 func isRecoverableError(err error) bool {
-	// 连接被重置、被信号中断，可以重试
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EINTR) {
 		return true
 	}

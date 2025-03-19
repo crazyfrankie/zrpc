@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+type authKey struct{}
+
 type MD map[string][]string
 
 // New creates an MD from a given key-value map.
@@ -52,6 +54,58 @@ func (md MD) Copy() MD {
 	out := make(MD, len(md))
 	for k, v := range md {
 		out[k] = copyOf(v)
+	}
+	return out
+}
+
+// Get obtains the values for a given key.
+//
+// k is converted to lowercase before searching in md.
+func (md MD) Get(k string) []string {
+	k = strings.ToLower(k)
+	return md[k]
+}
+
+// Set sets the value of a given key with a slice of values.
+//
+// k is converted to lowercase before storing in md.
+func (md MD) Set(k string, vals ...string) {
+	if len(vals) == 0 {
+		return
+	}
+	k = strings.ToLower(k)
+	md[k] = vals
+}
+
+// Append adds the values to key k, not overwriting what was already stored at
+// that key.
+//
+// k is converted to lowercase before storing in md.
+func (md MD) Append(k string, vals ...string) {
+	if len(vals) == 0 {
+		return
+	}
+	k = strings.ToLower(k)
+	md[k] = append(md[k], vals...)
+}
+
+// Delete removes the values for a given key k which is converted to lowercase
+// before removing it from md.
+func (md MD) Delete(k string) {
+	k = strings.ToLower(k)
+	delete(md, k)
+}
+
+// Join joins any number of mds into a single MD.
+//
+// The order of values for each key is determined by the order in which the mds
+// containing those values are presented to Join.
+func Join(mds ...MD) MD {
+	out := MD{}
+	for _, md := range mds {
+		for k, v := range md {
+			out[k] = append(out[k], v...)
+		}
 	}
 	return out
 }

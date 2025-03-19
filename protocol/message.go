@@ -1,9 +1,11 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/crazyfrankie/zrpc/mem"
 	"io"
 	"runtime"
 
@@ -20,6 +22,11 @@ var Compressors = map[CompressType]Compressor{
 var (
 	ErrMetaKVMissing         = errors.New("wrong metadata lines. some keys or values are missing")
 	ErrUnsupportedCompressor = errors.New("unsupported compressor")
+)
+
+const (
+	// ServiceError contains error info of service invocation
+	ServiceError = "__zrpc_error__"
 )
 
 const (
@@ -158,6 +165,79 @@ func (m *Message) Clone() *Message {
 	return c
 }
 
+func (m *Message) Encode() *[]byte {
+	buf := bytes.NewBuffer(make([]byte, 0, len(m.Metadata)*64))
+	encodeMetadata(m.Metadata, buf)
+	meta := buf.Bytes()
+
+	sNL := len(m.ServiceName)
+	sMdL := len(m.ServiceMethod)
+
+	var err error
+	payload := m.Payload
+	if m.GetCompressType() != None {
+		compressor := Compressors[m.GetCompressType()]
+		if compressor == nil {
+			m.SetCompressType(None)
+		} else {
+			payload, err = compressor.Zip(m.Payload)
+			if err != nil {
+				m.SetCompressType(None)
+				payload = m.Payload
+			}
+		}
+	}
+
+	dataL := (4 + sNL) + (4 + sMdL) + (4 + len(meta)) + (4 + len(payload))
+
+	// header + dataLen + snLen + sn + smdLen + smd + metaL + meta + payloadLen + payload
+	metaStart := 11 + 4 + (4 + sNL) + (4 + sMdL)
+
+	payloadStart := metaStart + (4 + len(meta))
+	l := 11 + 4 + dataL
+
+	data := mem.GetBuffer().Get(l)
+	copy(*data, m.Header[:])
+
+	binary.BigEndian.PutUint32((*data)[11:15], uint32(dataL))
+
+	binary.BigEndian.PutUint32((*data)[15:19], uint32(sNL))
+	copy((*data)[19:19+sNL], StringToSliceByte(m.ServiceName))
+
+	binary.BigEndian.PutUint32((*data)[19+sNL:23+sNL], uint32(sMdL))
+	copy((*data)[23+sNL:metaStart], StringToSliceByte(m.ServiceName))
+
+	binary.BigEndian.PutUint32((*data)[metaStart:metaStart+4], uint32(len(meta)))
+	copy((*data)[metaStart+4:payloadStart], meta)
+
+	binary.BigEndian.PutUint32((*data)[payloadStart:payloadStart+4], uint32(len(payload)))
+	copy((*data)[payloadStart:], payload)
+
+	return data
+}
+
+func encodeMetadata(md metadata.MD, buf *bytes.Buffer) {
+	if len(md) == 0 {
+		return
+	}
+
+	d := make([]byte, 4)
+
+	for k, values := range md {
+		binary.BigEndian.PutUint32(d, uint32(len(k)))
+		buf.Write(d)
+		buf.Write(StringToSliceByte(k))
+
+		buf.Write([]byte{byte(len(values))})
+
+		for _, v := range values {
+			binary.BigEndian.PutUint32(d, uint32(len(v)))
+			buf.Write(d)
+			buf.Write(StringToSliceByte(v))
+		}
+	}
+}
+
 func (m *Message) Decode(r io.Reader, maxLength int) error {
 	defer func() {
 		if err := recover(); err != nil {
@@ -261,7 +341,7 @@ func (m *Message) Decode(r io.Reader, maxLength int) error {
 
 // decodeMetadata reads out the data and maps it to the MD
 func decodeMetadata(l uint32, data []byte) (metadata.MD, error) {
-	m := make(map[string]string, 10)
+	m := make(metadata.MD)
 	n := uint32(0)
 	for n < l {
 		// parse one key and value
@@ -274,16 +354,25 @@ func decodeMetadata(l uint32, data []byte) (metadata.MD, error) {
 		k := string(data[n : n+sl])
 		n = n + sl
 
-		// value
-		sl = binary.BigEndian.Uint32(data[n : n+4])
-		n = n + 4
-		if n+sl > l {
-			return nil, ErrMetaKVMissing
+		// number of values
+		numValues := data[n]
+		n = n + 1
+		values := make([]string, numValues)
+
+		// read each value
+		for i := uint8(0); i < numValues; i++ {
+			sl = binary.BigEndian.Uint32(data[n : n+4])
+			n = n + 4
+			if n+sl > l {
+				return nil, ErrMetaKVMissing
+			}
+			v := string(data[n : n+sl])
+			n = n + sl
+			values[i] = v
 		}
-		v := string(data[n : n+sl])
-		n = n + sl
-		m[k] = v
+
+		m[k] = values
 	}
 
-	return metadata.New(m), nil
+	return m, nil
 }

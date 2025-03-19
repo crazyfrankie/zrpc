@@ -1,8 +1,16 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
+	"github.com/crazyfrankie/zrpc/protocol"
+	"math"
 	"time"
+)
+
+const (
+	defaultServerMaxReceiveMessageSize = 1024 * 1024 * 5
+	defaultServerMaxSendMessageSize    = math.MaxInt32
 )
 
 type serverOption struct {
@@ -11,9 +19,17 @@ type serverOption struct {
 	writeTimeout          time.Duration
 	maxReceiveMessageSize int
 	maxSendMessageSize    int
+	// AuthFunc can be used to auth.
+	AuthFunc        func(ctx context.Context, req *protocol.Message, token string) error
+	ServerErrorFunc func(res *protocol.Message, err error) string
 }
 
-var defaultServerOption = &serverOption{}
+var defaultServerOption = &serverOption{
+	readTimeout:           time.Second * 120,
+	writeTimeout:          time.Second * 120,
+	maxReceiveMessageSize: defaultServerMaxReceiveMessageSize,
+	maxSendMessageSize:    defaultServerMaxSendMessageSize,
+}
 
 type Option func(*serverOption)
 
