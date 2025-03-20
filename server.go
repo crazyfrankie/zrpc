@@ -1,4 +1,4 @@
-package server
+package zrpc
 
 import (
 	"bufio"
@@ -26,15 +26,6 @@ const (
 	ReadBufferSize = 1024
 )
 
-// MethodHandler is a function type that processes a unary RPC method call.
-type MethodHandler func(srv any, ctx context.Context, dec func(any) error) (any, error)
-
-// MethodDesc represents an RPC service's method specification.
-type MethodDesc struct {
-	MethodName string
-	Handler    MethodHandler
-}
-
 // Server represents an RPC Server.
 type Server struct {
 	lis        net.Listener
@@ -44,6 +35,8 @@ type Server struct {
 	serviceMap sync.Map       // service name -> service info
 	serveWG    sync.WaitGroup // counts active Serve goroutines for Stop/GracefulStop
 
+	cv             *sync.Cond
+	serve          bool
 	handleMsgCount int32
 	inShutdown     int32
 	done           chan struct{}
@@ -56,11 +49,14 @@ func NewServer(opts ...Option) *Server {
 		o(opt)
 	}
 
-	return &Server{
+	s := &Server{
 		opt:   opt,
 		conns: make(map[net.Conn]struct{}),
 		done:  make(chan struct{}),
 	}
+	s.cv = sync.NewCond(&s.mu)
+
+	return s
 }
 
 // Serve starts and listens RPC requests.
@@ -82,6 +78,7 @@ func (s *Server) serveListener(lis net.Listener) error {
 
 	s.mu.Lock()
 	s.lis = lis
+	s.serve = true
 	s.mu.Unlock()
 
 	for {
@@ -127,7 +124,7 @@ func (s *Server) serveListener(lis net.Listener) error {
 // serveConn runs the server on a single connection.
 // serveConn blocks, serving the connection until the client hangs up.
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
-	ctx = SetConnection(ctx, conn)
+	ctx = share.SetConnection(ctx, conn)
 	if s.isShutDown() {
 		s.removeConn(conn)
 		return
@@ -264,7 +261,7 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 	}
 	d := codec.GetBufferSliceFromRequest(req)
 	res := req.Clone()
-	if md, ok := srv.method[req.ServiceMethod]; ok {
+	if md, ok := srv.methods[req.ServiceMethod]; ok {
 		res.SetMessageType(protocol.Response)
 
 		df := func(v any) error {
@@ -342,23 +339,48 @@ func (s *Server) auth(ctx context.Context, req *protocol.Message) error {
 	return nil
 }
 
-func (s *Server) GracefulStop() {
-	s.stop()
+func (s *Server) Stop() {
+	s.stop(false)
 }
 
-func (s *Server) stop() {
-	for len(s.conns) != 0 {
-		s.serveWG.Wait()
+func (s *Server) GracefulStop() {
+	s.stop(true)
+}
+
+func (s *Server) stop(graceful bool) {
+	s.startShutdown()
+	s.mu.Lock()
+	s.lis.Close()
+	s.mu.Unlock()
+
+	s.serveWG.Wait()
+
+	if graceful {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		for len(s.conns) > 0 {
+			s.cv.Wait()
+		}
 	}
+
+	s.conns = nil
 }
 
 func (s *Server) isShutDown() bool {
 	return atomic.LoadInt32(&s.inShutdown) == 1
 }
 
+func (s *Server) startShutdown() {
+	if atomic.CompareAndSwapInt32(&s.inShutdown, 0, 1) {
+		close(s.done)
+	}
+}
+
 func (s *Server) removeConn(conn net.Conn) {
 	s.mu.Lock()
 	delete(s.conns, conn)
+	s.cv.Broadcast()
 	s.mu.Unlock()
 
 	conn.Close()
