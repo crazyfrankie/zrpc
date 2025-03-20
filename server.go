@@ -43,7 +43,7 @@ type Server struct {
 }
 
 // NewServer returns a new rpc server
-func NewServer(opts ...Option) *Server {
+func NewServer(opts ...ServerOption) *Server {
 	opt := defaultServerOption
 	for _, o := range opts {
 		o(opt)

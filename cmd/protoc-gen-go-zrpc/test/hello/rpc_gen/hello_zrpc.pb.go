@@ -3,7 +3,7 @@
 // -protoc-gen-go-zrpc v0.1.0
 // -protoc             v5.29.3
 
-package hello
+package rpc_gen
 
 import (
 	context "context"

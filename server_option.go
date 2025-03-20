@@ -31,33 +31,33 @@ var defaultServerOption = &serverOption{
 	maxSendMessageSize:    defaultServerMaxSendMessageSize,
 }
 
-type Option func(*serverOption)
+type ServerOption func(*serverOption)
 
-func WithReadTimeout(duration time.Duration) Option {
+func WithReadTimeout(duration time.Duration) ServerOption {
 	return func(opt *serverOption) {
 		opt.readTimeout = duration
 	}
 }
 
-func WithWriteTimeout(duration time.Duration) Option {
+func WithWriteTimeout(duration time.Duration) ServerOption {
 	return func(opt *serverOption) {
 		opt.writeTimeout = duration
 	}
 }
 
-func WithTLSConfig(tls *tls.Config) Option {
+func WithTLSConfig(tls *tls.Config) ServerOption {
 	return func(opt *serverOption) {
 		opt.tlsConfig = tls
 	}
 }
 
-func WithMaxReceiveMessageSize(max int) Option {
+func WithMaxReceiveMessageSize(max int) ServerOption {
 	return func(opt *serverOption) {
 		opt.maxReceiveMessageSize = max
 	}
 }
 
-func WithMaxSendMessageSize(max int) Option {
+func WithMaxSendMessageSize(max int) ServerOption {
 	return func(opt *serverOption) {
 		opt.maxSendMessageSize = max
 	}
