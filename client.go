@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"github.com/crazyfrankie/zrpc/metadata"
-	"math"
 	"sync"
-	"time"
 )
 
 var (
 	ErrClientConnClosing = errors.New("zrpc: the client connection is closing")
+	ErrNoAvailableConn   = errors.New("zrpc: no available connection")
 )
 
 type ClientInterface interface {
@@ -37,7 +36,7 @@ type Client struct {
 
 	target string
 	mu     sync.RWMutex
-	conns  map[*clientConn]struct{}
+	pool   *connPool
 
 	pending  map[uint64]*Call // pending represents a request that is being processed
 	sequence uint64           // sequence represents one communication
@@ -50,13 +49,13 @@ func NewClient(target string, opts ...ClientOption) (*Client, error) {
 	client := &Client{
 		opt:     defaultClientOption(),
 		target:  target,
-		conns:   make(map[*clientConn]struct{}),
 		pending: make(map[uint64]*Call),
 	}
 	for _, o := range opts {
 		o(client.opt)
 	}
 
+	client.pool = newConnPool(client, target, client.opt.maxPoolSize)
 	return client, nil
 }
 
@@ -69,50 +68,16 @@ func (c *Client) Close() {
 	}
 
 	c.closing = true
-	for conn := range c.conns {
-		conn.Close()
-	}
-	c.conns = nil
-}
+	c.shutdown = true
 
-func (c *Client) getConn() (*clientConn, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.closing || c.shutdown {
-		return nil, errors.New("client is shutting down")
-	}
-
-	for conn := range c.conns {
-		if !conn.inUse {
-			conn.inUse = true
-			conn.lastUsed = time.Now()
-			return conn, nil
+	if c.pool != nil {
+		c.pool.mu.Lock()
+		for _, conn := range c.pool.conns {
+			conn.Close()
 		}
+		c.pool.conns = nil
+		c.pool.mu.Unlock()
 	}
-
-	newConn, err := newClientConn(c, c.target)
-	if err != nil {
-		return nil, err
-	}
-	newConn.inUse = true
-	c.conns[newConn] = struct{}{}
-	return newConn, nil
-}
-
-func (c *Client) removeConn(conn *clientConn) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	conn.inUse = false
-	conn.lastUsed = time.Now()
-}
-
-func (c *Client) nextSeq(call *Call) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sequence = (c.sequence + 1) & math.MaxUint64
-	c.pending[c.sequence] = call
 }
 
 func GetMeta(ctx context.Context) (metadata.MD, bool) {

@@ -4,9 +4,8 @@ import (
 	"bufio"
 	"crypto/tls"
 	"net"
+	"sync"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 const (
@@ -14,56 +13,122 @@ const (
 	ReaderBufferSize = 16 * 1024
 )
 
-// clientConn represents actual connection with target machine,
-// and it based on tcp.
+type connPool struct {
+	mu        sync.Mutex
+	conns     []*clientConn
+	target    string
+	dialer    *Client
+	size      int
+	created   int
+	available chan *clientConn
+}
+
+func newConnPool(client *Client, target string, size int) *connPool {
+	return &connPool{
+		conns:     make([]*clientConn, 0, size),
+		target:    target,
+		dialer:    client,
+		size:      size,
+		available: make(chan *clientConn, size),
+	}
+}
+
+func (p *connPool) get() (*clientConn, error) {
+	for i := 0; i < 3; i++ {
+		select {
+		case conn := <-p.available:
+			if conn != nil && !conn.closed {
+				return conn, nil
+			}
+		default:
+		}
+
+		p.mu.Lock()
+		if p.created < p.size {
+			conn, err := newClientConn(p.dialer, p.target)
+			if err != nil {
+				p.mu.Unlock()
+				continue
+			}
+			p.conns = append(p.conns, conn)
+			p.created++
+			p.mu.Unlock()
+			return conn, nil
+		}
+		p.mu.Unlock()
+
+		select {
+		case conn := <-p.available:
+			if conn != nil && !conn.closed {
+				return conn, nil
+			}
+		case <-time.After(100 * time.Millisecond):
+			continue
+		}
+	}
+	return nil, ErrNoAvailableConn
+}
+func (p *connPool) put(cc *clientConn) {
+	if cc == nil || cc.closed {
+		return
+	}
+
+	select {
+	case p.available <- cc:
+	default:
+		cc.Close()
+		p.mu.Lock()
+		p.created--
+		p.mu.Unlock()
+	}
+}
+
 type clientConn struct {
 	conn     net.Conn
 	reader   *bufio.Reader
 	addr     string
 	lastUsed time.Time
-	inUse    bool
+	closed   bool
+	mu       sync.Mutex
 }
 
 func newClientConn(c *Client, target string) (*clientConn, error) {
 	var conn net.Conn
 	var err error
-	var tlsConn *tls.Conn
 
 	if c.opt.tls != nil {
 		dialer := &net.Dialer{
 			Timeout: c.opt.connectTimeout,
 		}
-		tlsConn, err = tls.DialWithDialer(dialer, "tcp", target, c.opt.tls)
-		conn = net.Conn(tlsConn)
+		conn, err = tls.DialWithDialer(dialer, "tcp", target, c.opt.tls)
 	} else {
 		conn, err = net.DialTimeout("tcp", target, c.opt.connectTimeout)
 	}
 
 	if err != nil {
-		zap.L().Warn("failed to dial server: ", zap.Error(err))
 		return nil, err
 	}
-	if conn != nil {
-		if tc, ok := conn.(*net.TCPConn); ok && c.opt.tcpKeepAlivePeriod > 0 {
-			_ = tc.SetKeepAlive(true)
-			_ = tc.SetKeepAlivePeriod(c.opt.tcpKeepAlivePeriod)
-		}
 
-		if c.opt.idleTimeout != 0 {
-			_ = conn.SetDeadline(time.Now().Add(c.opt.idleTimeout))
-		}
+	if tc, ok := conn.(*net.TCPConn); ok && c.opt.tcpKeepAlivePeriod > 0 {
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(c.opt.tcpKeepAlivePeriod)
 	}
-
-	r := bufio.NewReaderSize(conn, ReaderBufferSize)
 
 	return &clientConn{
 		conn:     conn,
 		addr:     target,
+		reader:   bufio.NewReaderSize(conn, ReaderBufferSize),
 		lastUsed: time.Now(),
-		reader:   r,
 	}, nil
 }
 
 func (cc *clientConn) Close() error {
+	cc.mu.Lock()
+	if cc.closed {
+		cc.mu.Unlock()
+		return nil
+	}
+	cc.closed = true
+	cc.mu.Unlock()
 	return cc.conn.Close()
 }

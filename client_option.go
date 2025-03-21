@@ -10,6 +10,7 @@ const (
 	defaultClientMaxReceiveMessageSize = 1024 * 1024 * 5
 	defaultClientMaxSendMessageSize    = math.MaxInt32
 	defaultConnectTimeout              = 20 * time.Second
+	defaultMaxPoolSize                 = 30
 )
 
 type clientOption struct {
@@ -20,6 +21,7 @@ type clientOption struct {
 	tcpKeepAlivePeriod time.Duration
 	// idleTimeout sets max idle time for underlying net.Conns
 	idleTimeout           time.Duration
+	maxPoolSize           int
 	maxReceiveMessageSize int
 	maxSendMessageSize    int
 }
@@ -29,6 +31,7 @@ func defaultClientOption() *clientOption {
 		connectTimeout:        defaultConnectTimeout,
 		maxSendMessageSize:    defaultClientMaxSendMessageSize,
 		maxReceiveMessageSize: defaultClientMaxReceiveMessageSize,
+		maxPoolSize:           defaultMaxPoolSize,
 	}
 }
 
@@ -55,5 +58,11 @@ func DialWithIdleTimeout(idle time.Duration) ClientOption {
 func DialWithTCPKeepAlive(period time.Duration) ClientOption {
 	return func(opt *clientOption) {
 		opt.tcpKeepAlivePeriod = period
+	}
+}
+
+func DialWithMaxPoolSize(size int) ClientOption {
+	return func(opt *clientOption) {
+		opt.maxPoolSize = size
 	}
 }
