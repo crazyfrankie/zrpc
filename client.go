@@ -3,13 +3,17 @@ package zrpc
 import (
 	"context"
 	"errors"
-	"github.com/crazyfrankie/zrpc/metadata"
 	"sync"
+	"time"
+
+	"github.com/crazyfrankie/zrpc/metadata"
 )
 
 var (
 	ErrClientConnClosing = errors.New("zrpc: the client connection is closing")
 	ErrNoAvailableConn   = errors.New("zrpc: no available connection")
+	ErrRequestTimeout    = errors.New("zrpc: request timeout")
+	ErrResponseMismatch  = errors.New("zrpc: response sequence mismatch")
 )
 
 type ClientInterface interface {
@@ -39,9 +43,13 @@ type Client struct {
 	pool   *connPool
 
 	pending  map[uint64]*Call // pending represents a request that is being processed
-	sequence uint64           // sequence represents one communication
+	sequence uint64           // sequence represents one communication, now atomic
 	closing  bool             // user has called Close
 	shutdown bool             // server has told us to stop
+
+	// 添加心跳检测相关字段
+	heartbeatTicker *time.Ticker
+	heartbeatDone   chan struct{}
 }
 
 // NewClient creates a new channel for the target machine,
@@ -56,7 +64,44 @@ func NewClient(target string, opts ...ClientOption) (*Client, error) {
 	}
 
 	client.pool = newConnPool(client, target, client.opt.maxPoolSize)
+
+	// 启动心跳检测
+	if client.opt.heartbeatInterval > 0 {
+		client.startHeartbeat()
+	}
+
 	return client, nil
+}
+
+func (c *Client) startHeartbeat() {
+	c.heartbeatTicker = time.NewTicker(c.opt.heartbeatInterval)
+	c.heartbeatDone = make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-c.heartbeatTicker.C:
+				c.sendHeartbeat()
+			case <-c.heartbeatDone:
+				return
+			}
+		}
+	}()
+}
+
+func (c *Client) sendHeartbeat() {
+	conn, err := c.pool.get()
+	if err != nil {
+		return
+	}
+	defer c.pool.put(conn)
+
+	// 创建一个简单的心跳请求
+	ctx, cancel := context.WithTimeout(context.Background(), c.opt.heartbeatTimeout)
+	defer cancel()
+
+	call := &Call{}
+	c.sendMsg(ctx, conn, call)
 }
 
 func (c *Client) Close() {
@@ -70,6 +115,12 @@ func (c *Client) Close() {
 	c.closing = true
 	c.shutdown = true
 
+	// 停止心跳检测
+	if c.heartbeatTicker != nil {
+		c.heartbeatTicker.Stop()
+		close(c.heartbeatDone)
+	}
+
 	if c.pool != nil {
 		c.pool.mu.Lock()
 		for _, conn := range c.pool.conns {
@@ -77,6 +128,11 @@ func (c *Client) Close() {
 		}
 		c.pool.conns = nil
 		c.pool.mu.Unlock()
+	}
+
+	// 清理所有挂起的请求
+	for _, call := range c.pending {
+		call.Err = ErrClientConnClosing
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"math"
 	"net"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/crazyfrankie/zrpc/codec"
 	"github.com/crazyfrankie/zrpc/metadata"
@@ -14,35 +16,53 @@ import (
 )
 
 func (c *Client) Invoke(ctx context.Context, method string, args any, reply any) error {
+	// 创建一个带超时的子上下文，防止请求永久阻塞
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); !ok {
+		// 默认30秒超时时间，如果用户没有设置
+		timeout := 30 * time.Second
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
 	// create a call info
 	call, err := newCall(method, args)
 	if err != nil {
 		return err
 	}
 
-	// Get connection from pool
-	conn, err := c.pool.get()
-	if err != nil {
-		return err
-	}
-	defer c.pool.put(conn)
+	done := make(chan error, 1)
 
-	// Send request
-	if err := c.sendMsg(ctx, conn, call); err != nil {
-		return err
-	}
-
-	// Start receiving in a goroutine
-	errChan := make(chan error, 1)
+	// 使用单独的goroutine来处理整个请求生命周期
 	go func() {
-		errChan <- c.recvMsg(ctx, conn, reply)
+		// 获取连接
+		conn, err := c.pool.get()
+		if err != nil {
+			done <- err
+			return
+		}
+
+		// 确保连接会被放回池中
+		defer c.pool.put(conn)
+
+		// 发送请求
+		if err := c.sendMsg(ctx, conn, call); err != nil {
+			done <- err
+			return
+		}
+
+		// 接收响应
+		err = c.recvMsg(ctx, conn, reply)
+		done <- err
 	}()
 
-	// Wait for completion or context cancellation
+	// 等待请求完成或上下文取消
 	select {
 	case <-ctx.Done():
+		// 在上下文取消时，尝试清理挂起的请求
+		c.cleanupCall(call)
 		return ctx.Err()
-	case err := <-errChan:
+	case err := <-done:
 		return err
 	}
 }
@@ -63,14 +83,25 @@ func (c *Client) sendMsg(ctx context.Context, conn *clientConn, call *Call) erro
 	if isHeartBeat {
 		req.SetHeartBeat(true)
 	}
-	seq := c.sequence
-	// Increment the sequence number and pending
-	c.sequence = (c.sequence + 1) & math.MaxUint64
-	c.pending[c.sequence] = call
+
+	// 使用原子操作安全地生成唯一序列号
+	seq := atomic.AddUint64(&c.sequence, 1) & math.MaxUint64
+	// 先设置序列号再保存到pending
+	req.SetSeq(seq)
+	call.Seq = seq // 保存序列号到Call结构体中，方便跟踪
+	c.pending[seq] = call
 	c.mu.Unlock()
 
-	req.SetSeq(seq)
 	data := req.Encode()
+
+	// 设置写超时
+	if conn.conn != nil {
+		deadline, ok := ctx.Deadline()
+		if ok {
+			conn.conn.SetWriteDeadline(deadline)
+		}
+	}
+
 	_, err = conn.conn.Write(*data)
 	if err != nil {
 		var e *net.OpError
@@ -81,26 +112,49 @@ func (c *Client) sendMsg(ctx context.Context, conn *clientConn, call *Call) erro
 				err = errors.New("net.OpError")
 			}
 		}
+
+		// 从pending中移除，避免内存泄漏
+		c.mu.Lock()
+		delete(c.pending, seq)
+		c.mu.Unlock()
 	}
 
 	return err
 }
 
 func (c *Client) recvMsg(ctx context.Context, conn *clientConn, reply any) error {
+	// 设置读取超时
+	if conn.conn != nil {
+		deadline, ok := ctx.Deadline()
+		if ok {
+			conn.conn.SetReadDeadline(deadline)
+		}
+	}
+
 	// Create message object to receive response
 	res := protocol.NewMessage()
 	err := res.Decode(conn.conn, c.opt.maxReceiveMessageSize)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	seq := res.GetSeq()
+
+	// 使用更严格的锁保护pending map的访问
 	c.mu.Lock()
-	call := c.pending[seq]
-	if call == nil {
+	call, ok := c.pending[seq]
+	if !ok || call == nil {
 		c.mu.Unlock()
-		return errors.New("missing sequence in client")
+		return fmt.Errorf("missing sequence %d in client, response mismatch", seq)
 	}
+
+	// 验证序列号与Call中保存的序列号是否一致
+	if call.Seq != seq {
+		c.mu.Unlock()
+		return fmt.Errorf("sequence mismatch: expected %d, got %d", call.Seq, seq)
+	}
+
+	// 只有在验证成功后才删除
 	delete(c.pending, seq)
 	c.mu.Unlock()
 
@@ -135,6 +189,7 @@ type Call struct {
 	ServiceMethod string
 	req           any
 	Err           error
+	Seq           uint64 // 添加序列号字段，用于跟踪请求和响应的对应关系
 }
 
 func newCall(method string, args any) (*Call, error) {
@@ -186,4 +241,16 @@ func (c *Call) prepareMessage(ctx context.Context) (*protocol.Message, error) {
 	}
 
 	return req, nil
+}
+
+// 清理挂起的请求，避免内存泄漏
+func (c *Client) cleanupCall(call *Call) {
+	if call == nil || call.Seq == 0 {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.pending, call.Seq)
 }

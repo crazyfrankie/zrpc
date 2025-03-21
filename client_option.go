@@ -11,6 +11,8 @@ const (
 	defaultClientMaxSendMessageSize    = math.MaxInt32
 	defaultConnectTimeout              = 20 * time.Second
 	defaultMaxPoolSize                 = 30
+	defaultHeartbeatInterval           = 30 * time.Second
+	defaultHeartbeatTimeout            = 5 * time.Second
 )
 
 type clientOption struct {
@@ -24,6 +26,10 @@ type clientOption struct {
 	maxPoolSize           int
 	maxReceiveMessageSize int
 	maxSendMessageSize    int
+	// heartbeatInterval sets interval for sending heartbeat
+	heartbeatInterval time.Duration
+	// heartbeatTimeout sets timeout for heartbeat request
+	heartbeatTimeout time.Duration
 }
 
 func defaultClientOption() *clientOption {
@@ -32,6 +38,8 @@ func defaultClientOption() *clientOption {
 		maxSendMessageSize:    defaultClientMaxSendMessageSize,
 		maxReceiveMessageSize: defaultClientMaxReceiveMessageSize,
 		maxPoolSize:           defaultMaxPoolSize,
+		heartbeatInterval:     defaultHeartbeatInterval,
+		heartbeatTimeout:      defaultHeartbeatTimeout,
 	}
 }
 
@@ -64,5 +72,17 @@ func DialWithTCPKeepAlive(period time.Duration) ClientOption {
 func DialWithMaxPoolSize(size int) ClientOption {
 	return func(opt *clientOption) {
 		opt.maxPoolSize = size
+	}
+}
+
+func DialWithHeartbeatInterval(interval time.Duration) ClientOption {
+	return func(opt *clientOption) {
+		opt.heartbeatInterval = interval
+	}
+}
+
+func DialWithHeartbeatTimeout(timeout time.Duration) ClientOption {
+	return func(opt *clientOption) {
+		opt.heartbeatTimeout = timeout
 	}
 }
