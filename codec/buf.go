@@ -22,14 +22,14 @@ func (bs *BufferSlice) ToBytes() []byte {
 }
 
 // GetBufferSliceFromRequest extracts the payload from the request and converts it to a BufferSlice
-func GetBufferSliceFromRequest(req *protocol.Message) BufferSlice {
+func GetBufferSliceFromRequest(msg *protocol.Message) BufferSlice {
 	buf := bufferPool.Get().(*BufferSlice)
-	if cap(buf.Data) < len(req.Payload) {
-		buf.Data = make([]byte, len(req.Payload))
+	if cap(buf.Data) < len(msg.Payload) {
+		buf.Data = make([]byte, len(msg.Payload))
 	} else {
-		buf.Data = buf.Data[:len(req.Payload)]
+		buf.Data = buf.Data[:len(msg.Payload)]
 	}
-	copy(buf.Data, req.Payload)
+	copy(buf.Data, msg.Payload)
 	return *buf
 }
 

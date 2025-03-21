@@ -1,65 +1,100 @@
 package mem
 
 import (
-	"bytes"
+	"math"
 	"sync"
 )
 
-const (
-	defaultMaxSize = 256 * 1024
-)
-
-var (
-	once   sync.Once
-	Buffer *BufferPool
-)
-
-func GetBuffer() *BufferPool {
-	once.Do(func() {
-		Buffer = NewBufferPool(defaultMaxSize)
-	})
-	return Buffer
+type levelPool struct {
+	size int
+	pool sync.Pool
 }
 
-type BufferPool struct {
-	pool    sync.Pool
-	maxSize int
-}
-
-func NewBufferPool(maxSize int) *BufferPool {
-	return &BufferPool{
-		maxSize: maxSize,
+func newLevelPool(size int) *levelPool {
+	return &levelPool{
+		size: size,
 		pool: sync.Pool{
 			New: func() interface{} {
-				return &bytes.Buffer{}
+				data := make([]byte, size)
+				return &data
 			},
 		},
 	}
 }
 
-func (bp *BufferPool) Get(size int) *[]byte {
-	buf := bp.pool.Get().(*bytes.Buffer)
-
-	buf.Reset()
-
-	if size > buf.Cap() {
-		buf.Grow(min(size, bp.maxSize) - buf.Cap())
-	}
-
-	f := buf.Bytes()
-	return &f
+type LimitedPool struct {
+	minSize int
+	maxSize int
+	pools   []*levelPool
 }
 
-func (bp *BufferPool) Put(buffer *[]byte) {
-	buf := bytes.NewBuffer(*buffer)
-	buf.Reset()
-
-	bp.pool.Put(buf)
+func NewLimitedPool(minSize, maxSize int) *LimitedPool {
+	if maxSize < minSize {
+		panic("maxSize can't be less than minSize")
+	}
+	const multiplier = 2
+	var pools []*levelPool
+	curSize := minSize
+	for curSize < maxSize {
+		pools = append(pools, newLevelPool(curSize))
+		curSize *= multiplier
+	}
+	pools = append(pools, newLevelPool(maxSize))
+	return &LimitedPool{
+		minSize: minSize,
+		maxSize: maxSize,
+		pools:   pools,
+	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+func (p *LimitedPool) findPool(size int) *levelPool {
+	if size > p.maxSize {
+		return nil
 	}
-	return b
+	idx := int(math.Ceil(math.Log2(float64(size) / float64(p.minSize))))
+	if idx < 0 {
+		idx = 0
+	}
+	if idx > len(p.pools)-1 {
+		return nil
+	}
+	return p.pools[idx]
+}
+
+func (p *LimitedPool) findPutPool(size int) *levelPool {
+	if size > p.maxSize {
+		return nil
+	}
+	if size < p.minSize {
+		return nil
+	}
+
+	idx := int(math.Floor(math.Log2(float64(size) / float64(p.minSize))))
+	if idx < 0 {
+		idx = 0
+	}
+	if idx > len(p.pools)-1 {
+		return nil
+	}
+	return p.pools[idx]
+}
+
+func (p *LimitedPool) Get(size int) *[]byte {
+	sp := p.findPool(size)
+	if sp == nil {
+		data := make([]byte, size)
+		return &data
+	}
+	buf := sp.pool.Get().(*[]byte)
+	*buf = (*buf)[:size]
+	return buf
+}
+
+func (p *LimitedPool) Put(b *[]byte) {
+	sp := p.findPutPool(cap(*b))
+	if sp == nil {
+		return
+	}
+	*b = (*b)[:cap(*b)]
+	sp.pool.Put(b)
 }

@@ -392,7 +392,7 @@ func (s *Server) getCodec() codec.Codec {
 
 type responseKey struct{}
 
-func SetHeader(ctx context.Context, md metadata.MD) error {
+func SetMeta(ctx context.Context, md metadata.MD) error {
 	if md.Len() == 0 {
 		return nil
 	}

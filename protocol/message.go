@@ -5,14 +5,16 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/crazyfrankie/zrpc/mem"
 	"io"
 	"runtime"
 
 	"go.uber.org/zap"
 
+	"github.com/crazyfrankie/zrpc/mem"
 	"github.com/crazyfrankie/zrpc/metadata"
 )
+
+var bufferPool = mem.NewLimitedPool(512, 4096)
 
 var Compressors = map[CompressType]Compressor{
 	None: &RawDataCompressor{},
@@ -196,7 +198,7 @@ func (m *Message) Encode() *[]byte {
 	payloadStart := metaStart + (4 + len(meta))
 	l := 11 + 4 + dataL
 
-	data := mem.GetBuffer().Get(l)
+	data := bufferPool.Get(l)
 	copy(*data, m.Header[:])
 
 	binary.BigEndian.PutUint32((*data)[11:15], uint32(dataL))
@@ -205,13 +207,13 @@ func (m *Message) Encode() *[]byte {
 	copy((*data)[19:19+sNL], StringToSliceByte(m.ServiceName))
 
 	binary.BigEndian.PutUint32((*data)[19+sNL:23+sNL], uint32(sMdL))
-	copy((*data)[23+sNL:metaStart], StringToSliceByte(m.ServiceName))
+	copy((*data)[23+sNL:metaStart], StringToSliceByte(m.ServiceMethod))
 
 	binary.BigEndian.PutUint32((*data)[metaStart:metaStart+4], uint32(len(meta)))
 	copy((*data)[metaStart+4:payloadStart], meta)
 
 	binary.BigEndian.PutUint32((*data)[payloadStart:payloadStart+4], uint32(len(payload)))
-	copy((*data)[payloadStart:], payload)
+	copy((*data)[payloadStart+4:], payload)
 
 	return data
 }

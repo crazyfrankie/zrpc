@@ -1,23 +1,16 @@
 package zrpc
 
 import (
-	"bufio"
 	"context"
-	"crypto/tls"
 	"errors"
-	"net"
+	"github.com/crazyfrankie/zrpc/metadata"
+	"math"
 	"sync"
-
-	"go.uber.org/zap"
+	"time"
 )
 
 var (
 	ErrClientConnClosing = errors.New("zrpc: the client connection is closing")
-)
-
-const (
-	// ReaderBufferSize is used for bufio reader.
-	ReaderBufferSize = 16 * 1024
 )
 
 type ClientInterface interface {
@@ -42,19 +35,23 @@ var _ ClientInterface = (*Client)(nil)
 type Client struct {
 	opt *clientOption
 
-	target   string
-	mu       sync.RWMutex
-	conns    map[*connWrapper]struct{}
-	closing  bool // user has called Close
-	shutdown bool // server has told us to stop
+	target string
+	mu     sync.RWMutex
+	conns  map[*clientConn]struct{}
+
+	pending  map[uint64]*Call // pending represents a request that is being processed
+	sequence uint64           // sequence represents one communication
+	closing  bool             // user has called Close
+	shutdown bool             // server has told us to stop
 }
 
 // NewClient creates a new channel for the target machine,
 func NewClient(target string, opts ...ClientOption) (*Client, error) {
 	client := &Client{
-		opt:    defaultClientOption(),
-		target: target,
-		conns:  make(map[*connWrapper]struct{}),
+		opt:     defaultClientOption(),
+		target:  target,
+		conns:   make(map[*clientConn]struct{}),
+		pending: make(map[uint64]*Call),
 	}
 	for _, o := range opts {
 		o(client.opt)
@@ -63,50 +60,66 @@ func NewClient(target string, opts ...ClientOption) (*Client, error) {
 	return client, nil
 }
 
-// newConnWrapper returns a
-func (c *Client) newConnWrapper(target string) (*connWrapper, error) {
-	if c.conns == nil {
-		return nil, ErrClientConnClosing
+func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closing {
+		return
 	}
 
-	cw := &connWrapper{
-		client:   c,
-		addr:     target,
-		isClosed: false,
+	c.closing = true
+	for conn := range c.conns {
+		conn.Close()
 	}
-
-	var conn net.Conn
-	var err error
-	var tlsConn *tls.Conn
-
-	if c.opt.tls != nil {
-		dialer := &net.Dialer{
-			Timeout: c.opt.connectTimeout,
-		}
-		tlsConn, err = tls.DialWithDialer(dialer, "tcp", target, c.opt.tls)
-		conn = net.Conn(tlsConn)
-	} else {
-		conn, err = net.DialTimeout("tcp", target, c.opt.connectTimeout)
-	}
-
-	if err != nil {
-		zap.L().Warn("failed to dial server: ", zap.Error(err))
-		return nil, err
-	}
-
-	cw.conn = conn
-	cw.reader = bufio.NewReaderSize(conn, ReaderBufferSize)
-
-	c.conns[cw] = struct{}{}
-
-	return cw, nil
+	c.conns = nil
 }
 
-type connWrapper struct {
-	client   *Client
-	conn     net.Conn
-	mu       sync.Mutex
-	reader   *bufio.Reader
-	addr     string
-	isClosed bool
+func (c *Client) getConn() (*clientConn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closing || c.shutdown {
+		return nil, errors.New("client is shutting down")
+	}
+
+	for conn := range c.conns {
+		if !conn.inUse {
+			conn.inUse = true
+			conn.lastUsed = time.Now()
+			return conn, nil
+		}
+	}
+
+	newConn, err := newClientConn(c, c.target)
+	if err != nil {
+		return nil, err
+	}
+	newConn.inUse = true
+	c.conns[newConn] = struct{}{}
+	return newConn, nil
+}
+
+func (c *Client) removeConn(conn *clientConn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	conn.inUse = false
+	conn.lastUsed = time.Now()
+}
+
+func (c *Client) nextSeq(call *Call) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sequence = (c.sequence + 1) & math.MaxUint64
+	c.pending[c.sequence] = call
+}
+
+func GetMeta(ctx context.Context) (metadata.MD, bool) {
+	md, ok := ctx.Value(responseKey{}).(metadata.MD)
+	if !ok {
+		return nil, false
+	}
+
+	return md, true
 }
