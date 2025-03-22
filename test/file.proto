@@ -1,0 +1,28 @@
+syntax="proto3";
+
+package file;
+
+option go_package = "/file";
+
+message FileMetaData {
+  string name = 1;
+  int64 size = 2;
+  string hash = 3;
+  string path = 4;
+  string content_type = 5;
+  int32 user_id = 6;
+  int64 folder_id = 7;
+}
+
+message UploadRequest {
+  FileMetaData metadata = 1;
+  bytes data = 2;
+}
+
+message UploadResponse {
+  int32 id = 1;
+}
+
+service FileService {
+  rpc Upload(UploadRequest) returns (UploadResponse);
+}

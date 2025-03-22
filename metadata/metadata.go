@@ -121,8 +121,8 @@ type mdOutgoingKey struct{}
 // in conjunction with AppendToOutgoingContext, NewOutgoingContext will
 // overwrite any previously-appended metadata. md must not be modified after
 // calling this function.
-func NewOutgoingContext(md MD) context.Context {
-	return context.WithValue(context.Background(), mdOutgoingKey{}, rawMD{md: md})
+func NewOutgoingContext(ctx context.Context, md MD) context.Context {
+	return context.WithValue(ctx, mdOutgoingKey{}, rawMD{md: md})
 }
 
 func AppendToOutgoingContext(ctx context.Context, kv ...string) context.Context {
@@ -176,17 +176,17 @@ func FromOutgoingContext(ctx context.Context) (MD, bool) {
 	return out, ok
 }
 
-// NewInComingContext is called by the user
-// It injects the MD passed from the client into the Context
-// md must not be modified after calling this function.
-func NewInComingContext(md MD) context.Context {
-	return context.WithValue(context.Background(), mdIncomingKey{}, md)
+// NewInComingContext is called by the zrpc automatically. User do not call!
+// It parses the client MD from the context
+func NewInComingContext(ctx context.Context, md MD) context.Context {
+	return context.WithValue(ctx, mdIncomingKey{}, md)
 }
 
-// FromInComingContext is called by the zrpc automatically. User do not call!
-// It parses the client MD from the context
+// FromInComingContext is called by the user
+// It injects the MD passed from the client into the Context
+// md must not be modified after calling this function.
 func FromInComingContext(ctx context.Context) (MD, bool) {
-	md, ok := ctx.Value(mdOutgoingKey{}).(MD)
+	md, ok := ctx.Value(mdIncomingKey{}).(MD)
 	if !ok {
 		return nil, false
 	}

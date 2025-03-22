@@ -190,7 +190,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 		}
 
 		// inject metadata to context
-		ctx = metadata.NewInComingContext(req.Metadata)
+		ctx = metadata.NewInComingContext(ctx, req.Metadata)
 		closeConn := false
 		if !req.IsHeartBeat() {
 			err = s.auth(ctx, req)

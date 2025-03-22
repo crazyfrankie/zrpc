@@ -47,7 +47,6 @@ type Client struct {
 	closing  bool             // user has called Close
 	shutdown bool             // server has told us to stop
 
-	// 添加心跳检测相关字段
 	heartbeatTicker *time.Ticker
 	heartbeatDone   chan struct{}
 }
@@ -65,7 +64,7 @@ func NewClient(target string, opts ...ClientOption) (*Client, error) {
 
 	client.pool = newConnPool(client, target, client.opt.maxPoolSize)
 
-	// 启动心跳检测
+	// initiate heartbeat detection
 	if client.opt.heartbeatInterval > 0 {
 		client.startHeartbeat()
 	}
@@ -89,6 +88,7 @@ func (c *Client) startHeartbeat() {
 	}()
 }
 
+// sendHeartbeat create a simple heartbeat request
 func (c *Client) sendHeartbeat() {
 	conn, err := c.pool.get()
 	if err != nil {
@@ -96,7 +96,6 @@ func (c *Client) sendHeartbeat() {
 	}
 	defer c.pool.put(conn)
 
-	// 创建一个简单的心跳请求
 	ctx, cancel := context.WithTimeout(context.Background(), c.opt.heartbeatTimeout)
 	defer cancel()
 
@@ -115,7 +114,7 @@ func (c *Client) Close() {
 	c.closing = true
 	c.shutdown = true
 
-	// 停止心跳检测
+	// stop Heartbeat Detection
 	if c.heartbeatTicker != nil {
 		c.heartbeatTicker.Stop()
 		close(c.heartbeatDone)
@@ -130,7 +129,7 @@ func (c *Client) Close() {
 		c.pool.mu.Unlock()
 	}
 
-	// 清理所有挂起的请求
+	// clear all pending requests
 	for _, call := range c.pending {
 		call.Err = ErrClientConnClosing
 	}

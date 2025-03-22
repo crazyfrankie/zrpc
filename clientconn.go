@@ -13,7 +13,6 @@ const (
 	// ReaderBufferSize is used for bufio reader.
 	ReaderBufferSize = 16 * 1024
 
-	// 连接状态常量
 	connStatusIdle = iota
 	connStatusInUse
 	connStatusClosed
@@ -40,20 +39,20 @@ func newConnPool(client *Client, target string, size int) *connPool {
 	}
 }
 
+// get returns an active conn
 func (p *connPool) get() (*clientConn, error) {
-	// 快速检查是否已关闭
 	if p.closed {
 		return nil, ErrClientConnClosing
 	}
 
-	// 1. 尝试从可用连接池中获取连接
+	// try to get a connection from the available connection pool
 	select {
 	case conn := <-p.available:
 		if conn != nil && !conn.isClosed() && conn.isHealthy() {
 			conn.markInUse()
 			return conn, nil
 		}
-		// 如果连接不健康，关闭并尝试创建新的
+		// If the connection is unhealthy, close and try to create a new one
 		if conn != nil {
 			conn.Close()
 			atomic.AddInt32(&p.created, -1)
@@ -61,7 +60,6 @@ func (p *connPool) get() (*clientConn, error) {
 	default:
 	}
 
-	// 2. 创建新连接
 	p.mu.Lock()
 	if atomic.LoadInt32(&p.created) < int32(p.size) {
 		conn, err := newClientConn(p.dialer, p.target)
@@ -78,7 +76,6 @@ func (p *connPool) get() (*clientConn, error) {
 	}
 	p.mu.Unlock()
 
-	// 3. 等待可用连接 (使用指数退避策略)
 	var conn *clientConn
 	baseWait := 10 * time.Millisecond
 
@@ -91,7 +88,6 @@ func (p *connPool) get() (*clientConn, error) {
 				conn.markInUse()
 				return conn, nil
 			}
-			// 如果连接不健康，关闭并继续等待
 			if conn != nil {
 				conn.Close()
 				atomic.AddInt32(&p.created, -1)
@@ -202,13 +198,14 @@ func (cc *clientConn) markIdle() {
 	atomic.StoreInt32(&cc.status, connStatusIdle)
 }
 
-// 检查连接是否健康
+// isHealthy check the health of the connection
 func (cc *clientConn) isHealthy() bool {
 	if cc.isClosed() {
 		return false
 	}
 
-	// 如果连接太久没用，可能已经被服务端关闭
+	// If the connection has not been used for too long,
+	// it may have been closed by the server.
 	if time.Since(cc.lastUsed) > 5*time.Minute {
 		return false
 	}
