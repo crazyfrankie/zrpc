@@ -12,7 +12,7 @@ import "github.com/crazyfrankie/zrpc"
 ```
 
 # Examples
-You can find all examples at [zrpc/examples](https://github.com/crazyfrankie/zrpc/examples)
+You can find all examples at [zrpc/examples](https://github.com/crazyfrankie/zrpc/tree/master/examples)
 
 This is a simple example creating servers and clients with zrpc.
 
