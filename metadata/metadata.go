@@ -11,10 +11,6 @@ type authKey struct{}
 type MD map[string][]string
 
 // New creates an MD from a given key-value map.
-// Uppercase letters are automatically converted to lowercase.
-//
-// Keys beginning with "zrpc-" are reserved for grpc-internal use only and may
-// result in errors if set in metadata.
 func New(m map[string]string) MD {
 	md := make(MD, len(m))
 	for k, v := range m {
@@ -26,10 +22,6 @@ func New(m map[string]string) MD {
 
 // Pairs returns an MD formed by the mapping of key, value ...
 // Pairs panics if len(kv) is odd.
-// Uppercase letters are automatically converted to lowercase.
-//
-// Keys beginning with "zrpc-" are reserved for grpc-internal use only and may
-// result in errors if set in metadata.
 func Pairs(kv ...string) MD {
 	if len(kv)%2 != 0 {
 		panic(fmt.Sprintf("metadata: Pairs got the odd number of input pairs for metadata: %d", len(kv)))
@@ -59,16 +51,12 @@ func (md MD) Copy() MD {
 }
 
 // Get obtains the values for a given key.
-//
-// k is converted to lowercase before searching in md.
 func (md MD) Get(k string) []string {
 	k = strings.ToLower(k)
 	return md[k]
 }
 
 // Set sets the value of a given key with a slice of values.
-//
-// k is converted to lowercase before storing in md.
 func (md MD) Set(k string, vals ...string) {
 	if len(vals) == 0 {
 		return
@@ -78,9 +66,6 @@ func (md MD) Set(k string, vals ...string) {
 }
 
 // Append adds the values to key k, not overwriting what was already stored at
-// that key.
-//
-// k is converted to lowercase before storing in md.
 func (md MD) Append(k string, vals ...string) {
 	if len(vals) == 0 {
 		return
@@ -97,9 +82,6 @@ func (md MD) Delete(k string) {
 }
 
 // Join joins any number of mds into a single MD.
-//
-// The order of values for each key is determined by the order in which the mds
-// containing those values are presented to Join.
 func Join(mds ...MD) MD {
 	out := MD{}
 	for _, md := range mds {
