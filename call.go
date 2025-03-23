@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/crazyfrankie/zrpc/codec"
+	"github.com/crazyfrankie/zrpc/mem"
 	"github.com/crazyfrankie/zrpc/metadata"
 	"github.com/crazyfrankie/zrpc/protocol"
 )
@@ -81,7 +82,8 @@ func (c *Client) sendMsg(ctx context.Context, conn *clientConn, call *Call) erro
 	c.pending[seq] = call
 	c.mu.Unlock()
 
-	data := req.Encode()
+	msgBuffer := req.Encode()
+	defer msgBuffer.Free()
 
 	if conn.conn != nil {
 		deadline, ok := ctx.Deadline()
@@ -90,7 +92,7 @@ func (c *Client) sendMsg(ctx context.Context, conn *clientConn, call *Call) erro
 		}
 	}
 
-	_, err = conn.conn.Write(*data)
+	_, err = conn.conn.Write(msgBuffer.ReadOnlyData())
 	if err != nil {
 		var e *net.OpError
 		if errors.As(err, &e) {
@@ -160,9 +162,7 @@ func (c *Client) recvMsg(ctx context.Context, conn *clientConn, reply any) error
 	}
 
 	// Unmarshal response payload
-	d := codec.GetBufferSliceFromRequest(res)
-	defer codec.PutBufferSlice(&d)
-	err = codec.DefaultCodec.Unmarshal(d, reply)
+	err = codec.DefaultCodec.Unmarshal(mem.BufferSlice{mem.SliceBuffer(res.Payload)}, reply)
 
 	return err
 }
@@ -205,8 +205,9 @@ func (c *Call) prepareMessage(ctx context.Context) (*protocol.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer codec.PutBufferSlice(&payload)
-	req.Payload = payload.ToBytes()
+	defer payload.Free()
+	req.Payload = payload.Materialize()
+
 	if len(req.Payload) > 1024 {
 		req.SetCompressType(protocol.Gzip)
 	}

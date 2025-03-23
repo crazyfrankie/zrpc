@@ -14,8 +14,6 @@ import (
 	"github.com/crazyfrankie/zrpc/metadata"
 )
 
-var bufferPool = mem.NewLimitedPool(512, 4096)
-
 var Compressors = map[CompressType]Compressor{
 	None: &RawDataCompressor{},
 	Gzip: &GzipCompressor{},
@@ -167,21 +165,24 @@ func (m *Message) Clone() *Message {
 	return c
 }
 
-func (m *Message) Encode() *[]byte {
+func (m *Message) Encode() mem.Buffer {
+	// meta encode
 	buf := bytes.NewBuffer(make([]byte, 0, len(m.Metadata)*64))
 	encodeMetadata(m.Metadata, buf)
 	meta := buf.Bytes()
+	metaL := len(meta)
 
 	sNL := len(m.ServiceName)
-	sMdL := len(m.ServiceMethod)
+	sMtdL := len(m.ServiceMethod)
 
-	var err error
+	// payload compress
 	payload := m.Payload
 	if m.GetCompressType() != None {
 		compressor := Compressors[m.GetCompressType()]
 		if compressor == nil {
 			m.SetCompressType(None)
 		} else {
+			var err error
 			payload, err = compressor.Zip(m.Payload)
 			if err != nil {
 				m.SetCompressType(None)
@@ -189,33 +190,57 @@ func (m *Message) Encode() *[]byte {
 			}
 		}
 	}
+	payloadL := len(payload)
 
-	dataL := (4 + sNL) + (4 + sMdL) + (4 + len(meta)) + (4 + len(payload))
+	// total data len
+	dataL := (4 + sNL) + (4 + sMtdL) + (4 + metaL) + (4 + payloadL)
 
-	// header + dataLen + snLen + sn + smdLen + smd + metaL + meta + payloadLen + payload
-	metaStart := 11 + 4 + (4 + sNL) + (4 + sMdL)
+	// headBuf size (header + dataLen + serviceNameLen + serviceName + methodLen + method)
+	headBufSize := 11 + 4 + 4 + sNL + 4 + sMtdL
 
-	payloadStart := metaStart + (4 + len(meta))
-	l := 11 + 4 + dataL
+	// get a pool
+	pool := mem.DefaultBufferPool()
 
-	data := bufferPool.Get(l)
-	copy(*data, m.Header[:])
+	// total buf slice
+	var bufSlice mem.BufferSlice
 
-	binary.BigEndian.PutUint32((*data)[11:15], uint32(dataL))
+	headBuf := pool.Get(headBufSize)
+	offset := 0
 
-	binary.BigEndian.PutUint32((*data)[15:19], uint32(sNL))
-	copy((*data)[19:19+sNL], StringToSliceByte(m.ServiceName))
+	// write header
+	copy((*headBuf)[offset:offset+11], m.Header[:])
+	offset += 11
+	binary.BigEndian.PutUint32((*headBuf)[offset:offset+4], uint32(dataL))
+	offset += 4
 
-	binary.BigEndian.PutUint32((*data)[19+sNL:23+sNL], uint32(sMdL))
-	copy((*data)[23+sNL:metaStart], StringToSliceByte(m.ServiceMethod))
+	// write serviceName and it's length
+	binary.BigEndian.PutUint32((*headBuf)[offset:offset+4], uint32(sNL))
+	offset += 4
+	copy((*headBuf)[offset:offset+sNL], StringToSliceByte(m.ServiceName))
+	offset += sNL
 
-	binary.BigEndian.PutUint32((*data)[metaStart:metaStart+4], uint32(len(meta)))
-	copy((*data)[metaStart+4:payloadStart], meta)
+	// write serviceMethod and it's length
+	binary.BigEndian.PutUint32((*headBuf)[offset:offset+4], uint32(sMtdL))
+	offset += 4
+	copy((*headBuf)[offset:offset+sMtdL], StringToSliceByte(m.ServiceMethod))
+	offset += sMtdL
 
-	binary.BigEndian.PutUint32((*data)[payloadStart:payloadStart+4], uint32(len(payload)))
-	copy((*data)[payloadStart+4:], payload)
+	*headBuf = (*headBuf)[:offset]
+	bufSlice = append(bufSlice, mem.NewBuffer(headBuf, pool))
 
-	return data
+	// write meta
+	metaBuf := pool.Get(4 + metaL)
+	binary.BigEndian.PutUint32(*metaBuf, uint32(metaL))
+	copy((*metaBuf)[4:], meta)
+	bufSlice = append(bufSlice, mem.NewBuffer(metaBuf, pool))
+
+	// write payload
+	payloadBuf := pool.Get(4 + payloadL)
+	binary.BigEndian.PutUint32(*payloadBuf, uint32(payloadL))
+	copy((*payloadBuf)[4:], payload)
+	bufSlice = append(bufSlice, mem.NewBuffer(payloadBuf, pool))
+
+	return bufSlice.MaterializeToBuffer(pool)
 }
 
 func encodeMetadata(md metadata.MD, buf *bytes.Buffer) {
@@ -249,24 +274,21 @@ func (m *Message) Decode(r io.Reader, maxLength int) error {
 		}
 	}()
 
-	// parse header
-	_, err := io.ReadFull(r, m.Header[:1])
-	if err != nil {
+	// check magic number
+	if _, err := io.ReadFull(r, m.Header[:1]); err != nil {
 		return err
 	}
 	if !m.Header.CheckMagicNumber() {
 		return fmt.Errorf("wrong magic number: %v", m.Header[0])
 	}
-
-	_, err = io.ReadFull(r, m.Header[1:])
-	if err != nil {
+	// read the remaining header
+	if _, err := io.ReadFull(r, m.Header[1:]); err != nil {
 		return err
 	}
 
 	// total message body
 	lenData := make([]byte, 4)
-	_, err = io.ReadFull(r, lenData)
-	if err != nil {
+	if _, err := io.ReadFull(r, lenData); err != nil {
 		return err
 	}
 	l := binary.BigEndian.Uint32(lenData)
@@ -275,70 +297,92 @@ func (m *Message) Decode(r io.Reader, maxLength int) error {
 		return fmt.Errorf("the max receive message length is %d, but receive %d", maxLength, l)
 	}
 
-	totalLength := int(l)
-	if cap(m.buf) >= totalLength {
-		m.buf = m.buf[:totalLength]
-	} else {
-		m.buf = make([]byte, totalLength)
-	}
-	// In fact, we don't need the local variable buf,
-	// because m.buf itself is already a buffer of
-	// all the data excluding the header.
-	// The reason for using buf again is to
-	// make it refer to the same underlying array as m.buf,
-	// and to cut it without modifying the data already read,
-	// also more readable
-	buf := m.buf
-	_, err = io.ReadFull(r, buf)
-	if err != nil {
+	// use mem.BufferPool to read the remaining data
+	pool := mem.DefaultBufferPool()
+	restBuf := pool.Get(int(l))
+
+	if _, err := io.ReadFull(r, *restBuf); err != nil {
+		pool.Put(restBuf)
 		return err
 	}
 
-	n := 0
-	// parse serviceName
-	l = binary.BigEndian.Uint32(buf[n:4])
-	n += 4
-	nEnd := n + int(l)
-	m.ServiceName = SliceByteToString(buf[n:nEnd])
-	n = nEnd
+	dataBuf := mem.NewBuffer(restBuf, pool)
+	defer dataBuf.Free()
 
-	// parse serviceMethod
-	l = binary.BigEndian.Uint32(buf[n : n+4])
-	n += 4
-	nEnd = n + int(l)
-	m.ServiceMethod = SliceByteToString(buf[n:nEnd])
-	n = nEnd
+	data := dataBuf.ReadOnlyData()
+	offset := 0
+
+	// parse service name
+	if offset+4 > len(data) {
+		return errors.New("invalid message format: insufficient data for service name length")
+	}
+	svcNameLen := binary.BigEndian.Uint32(data[offset : offset+4])
+	offset += 4
+
+	if offset+int(svcNameLen) > len(data) {
+		return errors.New("invalid message format: insufficient data for service name")
+	}
+	m.ServiceName = SliceByteToString(data[offset : offset+int(svcNameLen)])
+	offset += int(svcNameLen)
+
+	// parse method name
+	if offset+4 > len(data) {
+		return errors.New("invalid message format: insufficient data for service method length")
+	}
+	methodLen := binary.BigEndian.Uint32(data[offset : offset+4])
+	offset += 4
+
+	if offset+int(methodLen) > len(data) {
+		return errors.New("invalid message format: insufficient data for service method")
+	}
+	m.ServiceMethod = SliceByteToString(data[offset : offset+int(methodLen)])
+	offset += int(methodLen)
 
 	// parse metadata
-	l = binary.BigEndian.Uint32(buf[n : n+4])
-	n += 4
-	nEnd = n + int(l)
+	if offset+4 > len(data) {
+		return errors.New("invalid message format: insufficient data for metadata length")
+	}
+	metaLen := binary.BigEndian.Uint32(data[offset : offset+4])
+	offset += 4
 
-	if l > 0 {
-		m.Metadata, err = decodeMetadata(l, buf[n:nEnd])
+	if metaLen > 0 {
+		if offset+int(metaLen) > len(data) {
+			return errors.New("invalid message format: insufficient data for metadata")
+		}
+		var err error
+		m.Metadata, err = decodeMetadata(metaLen, data[offset:offset+int(metaLen)])
 		if err != nil {
 			return err
 		}
+		offset += int(metaLen)
 	}
-	n = nEnd
 
 	// parse payload
-	l = binary.BigEndian.Uint32(buf[n : n+4])
-	n += 4
-	m.Payload = buf[n:]
+	if offset+4 > len(data) {
+		return errors.New("invalid message format: insufficient data for payload length")
+	}
+	payloadLen := binary.BigEndian.Uint32(data[offset : offset+4])
+	offset += 4
+
+	if offset+int(payloadLen) > len(data) {
+		return errors.New("invalid message format: insufficient data for payload")
+	}
+	m.Payload = make([]byte, payloadLen)
+	copy(m.Payload, data[offset:offset+int(payloadLen)])
 
 	if m.GetCompressType() != None {
 		compressor := Compressors[m.GetCompressType()]
 		if compressor == nil {
 			return ErrUnsupportedCompressor
 		}
+		var err error
 		m.Payload, err = compressor.Unzip(m.Payload)
 		if err != nil {
 			return err
 		}
 	}
 
-	return err
+	return nil
 }
 
 // decodeMetadata reads out the data and maps it to the MD

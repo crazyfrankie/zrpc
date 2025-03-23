@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/crazyfrankie/zrpc/codec"
+	"github.com/crazyfrankie/zrpc/mem"
 	"github.com/crazyfrankie/zrpc/metadata"
 	"github.com/crazyfrankie/zrpc/protocol"
 	"github.com/crazyfrankie/zrpc/share"
@@ -243,12 +244,13 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 	if req.IsHeartBeat() {
 		res := req.Clone()
 		res.SetMessageType(protocol.Response)
-		data := req.Encode()
+		msgBuffer := res.Encode()
 
 		if s.opt.writeTimeout != 0 {
 			conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
 		}
-		conn.Write(*data)
+		conn.Write(msgBuffer.ReadOnlyData())
+		msgBuffer.Free()
 	}
 
 	var err error
@@ -259,13 +261,13 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 	if !ok {
 		err = errors.New("rpcx: can't find service " + req.ServiceName)
 	}
-	d := codec.GetBufferSliceFromRequest(req)
+
 	res := req.Clone()
 	if md, ok := srv.methods[req.ServiceMethod]; ok {
 		res.SetMessageType(protocol.Response)
 
 		df := func(v any) error {
-			if err := s.getCodec().Unmarshal(d, v); err != nil {
+			if err := s.getCodec().Unmarshal(mem.BufferSlice{mem.SliceBuffer(req.Payload)}, v); err != nil {
 				return fmt.Errorf("zrpc: error unmarshalling request: %v", err)
 			}
 
@@ -289,23 +291,32 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 }
 
 func (s *Server) sendResponse(conn net.Conn, err error, req, res *protocol.Message, reply any) {
-	d, appErr := s.getCodec().Marshal(reply)
-	if appErr != nil {
-		err = appErr
+	var d mem.BufferSlice
+	var appErr error
+
+	if reply != nil {
+		d, appErr = s.getCodec().Marshal(reply)
+		if appErr != nil {
+			err = appErr
+		}
 	}
-	defer codec.PutBufferSlice(&d)
-	res.Payload = d.ToBytes()
-	if len(res.Payload) > 1024 && res.GetCompressType() != protocol.None {
-		res.SetCompressType(req.GetCompressType())
+	defer d.Free()
+
+	if d.Len() > 0 {
+		res.Payload = d.Materialize()
+		if len(res.Payload) > 1024 && req.GetCompressType() != protocol.None {
+			res.SetCompressType(req.GetCompressType())
+		}
 	}
 
-	data := res.Encode()
+	msgBuffer := res.Encode()
 
 	go func() {
 		if s.opt.writeTimeout != 0 {
 			conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
 		}
-		_, writeErr := conn.Write(*data)
+		_, writeErr := conn.Write(msgBuffer.ReadOnlyData())
+		msgBuffer.Free()
 		if writeErr != nil {
 			zap.L().Error("zrpc: failed to send response", zap.Error(writeErr))
 		}
