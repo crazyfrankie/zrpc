@@ -100,5 +100,5 @@ var FileService_ServiceDesc = zrpc.ServiceDesc{
 			Handler:    _FileService_Upload_Handler,
 		},
 	},
-	Metadata: "file.proto",
+	Metadata: "test/file.proto",
 }
