@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/crazyfrankie/zrpc/metadata"
@@ -53,16 +52,6 @@ type Client struct {
 
 	heartbeatTicker *time.Ticker
 	heartbeatDone   chan struct{}
-
-	// 新增统计指标
-	stats struct {
-		requestCount      atomic.Int64
-		successCount      atomic.Int64
-		errorCount        atomic.Int64
-		timeoutCount      atomic.Int64
-		networkErrorCount atomic.Int64
-		retryCount        atomic.Int64
-	}
 }
 
 // NewClient creates a new channel for the target machine,
@@ -120,10 +109,8 @@ func (c *Client) sendHeartbeat() {
 // Invoke sends the RPC request on the wire and returns after response is
 // received.  This is typically called by generated code.
 func (c *Client) Invoke(ctx context.Context, method string, args any, reply any) error {
-	c.stats.requestCount.Add(1)
 
 	if args == nil || reply == nil {
-		c.stats.errorCount.Add(1)
 		return ErrInvalidArgument
 	}
 
@@ -137,11 +124,9 @@ func (c *Client) Invoke(ctx context.Context, method string, args any, reply any)
 	var lastErr error
 	for retry := 0; retry <= c.opt.maxRetries; retry++ {
 		if retry > 0 {
-			c.stats.retryCount.Add(1)
 
 			select {
 			case <-ctx.Done():
-				c.stats.timeoutCount.Add(1)
 				return ctx.Err()
 			default:
 			}
@@ -157,7 +142,6 @@ func (c *Client) Invoke(ctx context.Context, method string, args any, reply any)
 				select {
 				case <-ctx.Done():
 					timer.Stop()
-					c.stats.timeoutCount.Add(1)
 					return ctx.Err()
 				case <-timer.C:
 				}
@@ -180,14 +164,12 @@ func (c *Client) Invoke(ctx context.Context, method string, args any, reply any)
 
 		call, err := newCall(method, args)
 		if err != nil {
-			c.stats.errorCount.Add(1)
 			return err
 		}
 
 		c.mu.Lock()
 		if c.closing || c.shutdown {
 			c.mu.Unlock()
-			c.stats.errorCount.Add(1)
 			return ErrClientConnClosing
 		}
 		c.mu.Unlock()
@@ -198,7 +180,6 @@ func (c *Client) Invoke(ctx context.Context, method string, args any, reply any)
 			// close the connection instead of putting it back into the pool
 			connReleased = true
 			conn.Close()
-			c.stats.networkErrorCount.Add(1)
 			lastErr = err
 			continue
 		}
@@ -211,12 +192,10 @@ func (c *Client) Invoke(ctx context.Context, method string, args any, reply any)
 		c.pool.put(conn)
 
 		if err != nil {
-			c.stats.errorCount.Add(1)
 			lastErr = err
 			continue
 		}
 
-		c.stats.successCount.Add(1)
 		return nil
 	}
 
@@ -224,7 +203,6 @@ func (c *Client) Invoke(ctx context.Context, method string, args any, reply any)
 		return lastErr
 	}
 
-	c.stats.errorCount.Add(1)
 	return ErrMaxRetryExceeded
 }
 

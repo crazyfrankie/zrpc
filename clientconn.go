@@ -295,11 +295,8 @@ type clientConn struct {
 	status   int32 // connection status
 	mu       sync.Mutex
 
-	useCount    int32         // Use Counting
-	errorCount  int32         // error count
-	healthScore int32         // Health score (0-100)
-	createTime  time.Time     // Creation time
-	pingTime    time.Duration // RTT of last ping
+	healthScore int32     // Health score (0-100)
+	createTime  time.Time // Creation time
 }
 
 func newClientConn(c *Client, target string) (*clientConn, error) {
@@ -364,7 +361,6 @@ func (cc *clientConn) isClosed() bool {
 
 func (cc *clientConn) markInUse() {
 	atomic.StoreInt32(&cc.status, connStatusInUse)
-	atomic.AddInt32(&cc.useCount, 1)
 }
 
 func (cc *clientConn) markIdle() {
