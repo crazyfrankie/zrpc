@@ -8,7 +8,6 @@ import (
 	"net"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/crazyfrankie/zrpc/codec"
 	"github.com/crazyfrankie/zrpc/mem"
@@ -16,11 +15,15 @@ import (
 	"github.com/crazyfrankie/zrpc/protocol"
 )
 
-func (c *Client) Invoke(ctx context.Context, method string, args any, reply any) error {
+// invokeWithoutRetry sends the RPC request on the wire and returns after response is
+// received.  This is typically called by generated code.
+//
+// DEPRECATED This is the old implementation for internal use,
+// the new implementation is in client.go
+func (c *Client) invokeWithoutRetry(ctx context.Context, method string, args any, reply any) error {
 	var cancel context.CancelFunc
 	if _, ok := ctx.Deadline(); !ok {
-		timeout := 30 * time.Second
-		ctx, cancel = context.WithTimeout(ctx, timeout)
+		ctx, cancel = context.WithTimeout(ctx, c.opt.requestTimeout)
 		defer cancel()
 	}
 
@@ -177,6 +180,16 @@ type Call struct {
 	req           any
 	Err           error
 	Seq           uint64
+	Done          chan *Call
+}
+
+func (c *Call) done() {
+	if c.Done != nil {
+		select {
+		case c.Done <- c:
+		default:
+		}
+	}
 }
 
 func newCall(method string, args any) (*Call, error) {
@@ -194,6 +207,7 @@ func newCall(method string, args any) (*Call, error) {
 		ServiceName:   svc,
 		ServiceMethod: mtd,
 		req:           args,
+		Done:          make(chan *Call, 1),
 	}, nil
 }
 

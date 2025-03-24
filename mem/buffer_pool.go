@@ -1,128 +1,143 @@
 package mem
 
 import (
-	"math"
 	"sync"
 )
 
-const (
-	defaultMinBufferPoolSize = 1 << 6  // 64 B
-	defaultMaxBufferPoolSize = 1 << 20 // 1 MB
-)
+// BufferPool is a self-managed pool with various buffer sizes.
+type BufferPool interface {
+	// Get returns a buffer with the size.
+	Get(size int) *[]byte
+	// Put returns the buffer back to the pool.
+	Put(buffer *[]byte)
+}
 
-var defaultBufferPool BufferPool
+type PoolConfig struct {
+	MaxPoolSize int
+}
+
+var DefaultConfig = &PoolConfig{
+	MaxPoolSize: 1024 * 1024 * 4, // 4MB
+}
+
+var defaultPool bufferPool
+
+var bufferPoolSizes = []int{
+	1 << 7,  // 128B
+	1 << 8,  // 256B
+	1 << 9,  // 512B
+	1 << 10, // 1KB
+	1 << 11, // 2KB
+	1 << 12, // 4KB
+	1 << 13, // 8KB
+	1 << 14, // 16KB
+	1 << 15, // 32KB
+	1 << 16, // 64KB
+	1 << 17, // 128KB
+	1 << 18, // 256KB
+	1 << 19, // 512KB
+	1 << 20, // 1MB
+	1 << 21, // 2MB
+	1 << 22, // 4MB
+}
+
+type bufferPool struct {
+	config  *PoolConfig
+	pools   []*sync.Pool
+	maxSize int
+}
 
 func init() {
-	defaultBufferPool = NewLimitedPool(defaultMinBufferPoolSize, defaultMaxBufferPoolSize)
-}
+	defaultPool.config = DefaultConfig
+	defaultPool.maxSize = bufferPoolSizes[len(bufferPoolSizes)-1]
+	defaultPool.pools = make([]*sync.Pool, len(bufferPoolSizes))
 
-type BufferPool interface {
-	Put(buf *[]byte)
-	Get(length int) *[]byte
-}
-
-// DefaultBufferPool returns the current default buffer pool. It is a BufferPool
-// created with NewLimitedPool that uses a set of default sizes optimized for
-// expected workflows.
-func DefaultBufferPool() BufferPool {
-	return defaultBufferPool
-}
-
-type levelPool struct {
-	size int
-	pool sync.Pool
-}
-
-// newLevelPool returns a buffer pool of a specific size
-func newLevelPool(size int) *levelPool {
-	return &levelPool{
-		size: size,
-		pool: sync.Pool{
+	for i := range bufferPoolSizes {
+		size := bufferPoolSizes[i]
+		defaultPool.pools[i] = &sync.Pool{
 			New: func() interface{} {
-				data := make([]byte, size)
-				return &data
+				buf := make([]byte, 0, size)
+				return &buf
 			},
-		},
+		}
 	}
 }
 
-// limitedPool is a collection of buffer pools of a specific size,
-// with minSize and maxSize controlling the size of the buffer pools within it.
-type limitedPool struct {
-	minSize int
-	maxSize int
-	pools   []*levelPool
+// DefaultBufferPool returns the default pool
+func DefaultBufferPool() BufferPool {
+	return &defaultPool
 }
 
-// NewLimitedPool builds a buffer pool of a specific size based on the provided minSize and maxSize,
-// and the buffer pool size is multiplied by the multiplier, which is 2 by default.
-func NewLimitedPool(minSize, maxSize int) BufferPool {
-	if maxSize < minSize {
-		panic("maxSize can't be less than minSize")
+// Get returns a buffer with the size.
+func (p *bufferPool) Get(size int) *[]byte {
+	if size <= 0 {
+		return &[]byte{}
 	}
-	const multiplier = 2
-	var pools []*levelPool
-	curSize := minSize
-	for curSize < maxSize {
-		pools = append(pools, newLevelPool(curSize))
-		curSize *= multiplier
+
+	if i, exactMatch := p.findPool(size); exactMatch {
+		buf := p.pools[i].Get().(*[]byte)
+		*buf = (*buf)[0:size]
+		return buf
 	}
-	pools = append(pools, newLevelPool(maxSize))
-	return &limitedPool{
-		minSize: minSize,
-		maxSize: maxSize,
-		pools:   pools,
+
+	index := p.findBestFitPool(size)
+	if index >= 0 {
+		buf := p.pools[index].Get().(*[]byte)
+		*buf = (*buf)[0:size]
+		return buf
 	}
+
+	buf := make([]byte, size)
+	return &buf
 }
 
-func (p *limitedPool) Get(size int) *[]byte {
-	sp := p.findGetPool(size)
-	if sp == nil {
-		data := make([]byte, size)
-		return &data
-	}
-	buf := sp.pool.Get().(*[]byte)
-	*buf = (*buf)[:size]
-	return buf
-}
-
-func (p *limitedPool) Put(b *[]byte) {
-	sp := p.findPutPool(cap(*b))
-	if sp == nil {
+// Put returns the buffer to the pool.
+func (p *bufferPool) Put(buffer *[]byte) {
+	if buffer == nil {
 		return
 	}
-	*b = (*b)[:cap(*b)]
-	sp.pool.Put(b)
+
+	size := cap(*buffer)
+	if size <= 0 || size > p.maxSize {
+		return
+	}
+
+	*buffer = (*buffer)[:0]
+
+	if index, exact := p.findPool(size); exact {
+		p.pools[index].Put(buffer)
+		return
+	}
+
+	index := p.findClosestPool(size)
+	if index >= 0 {
+		p.pools[index].Put(buffer)
+	}
 }
 
-func (p *limitedPool) findGetPool(size int) *levelPool {
-	if size > p.maxSize {
-		return nil
+func (p *bufferPool) findPool(size int) (int, bool) {
+	for i, poolSize := range bufferPoolSizes {
+		if size == poolSize {
+			return i, true
+		}
 	}
-	idx := int(math.Ceil(math.Log2(float64(size) / float64(p.minSize))))
-	if idx < 0 {
-		idx = 0
-	}
-	if idx > len(p.pools)-1 {
-		return nil
-	}
-	return p.pools[idx]
+	return -1, false
 }
 
-func (p *limitedPool) findPutPool(size int) *levelPool {
-	if size > p.maxSize {
-		return nil
+func (p *bufferPool) findBestFitPool(size int) int {
+	for i, poolSize := range bufferPoolSizes {
+		if size <= poolSize {
+			return i
+		}
 	}
-	if size < p.minSize {
-		return nil
-	}
+	return -1
+}
 
-	idx := int(math.Floor(math.Log2(float64(size) / float64(p.minSize))))
-	if idx < 0 {
-		idx = 0
+func (p *bufferPool) findClosestPool(size int) int {
+	for i := len(bufferPoolSizes) - 1; i >= 0; i-- {
+		if size >= bufferPoolSizes[i] {
+			return i
+		}
 	}
-	if idx > len(p.pools)-1 {
-		return nil
-	}
-	return p.pools[idx]
+	return 0
 }

@@ -112,10 +112,12 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/crazyfrankie/zrpc"
 	"github.com/crazyfrankie/zrpc/benchmark/bench"
@@ -125,20 +127,49 @@ var (
 	host       = flag.String("host", "127.0.0.1:8082", "listened ip and port")
 	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 	delay      = flag.Duration("delay", 0, "delay to mock business processing")
-	workerNum  = flag.Int("worker_num", runtime.NumCPU()*2, "number of workers for request processing")
-	taskQueue  = flag.Int("task_queue", 10000, "task queue size for worker pool")
+	workerNum  = flag.Int("worker_num", runtime.NumCPU()*4, "number of workers for request processing")
+	taskQueue  = flag.Int("task_queue", 100000, "task queue size for worker pool")
 	pprofPort  = flag.String("pprof", ":6060", "pprof http server address")
 	logLevel   = flag.String("log", "info", "log level: debug, info, warn, error")
+	bufferSize = flag.Int("buffer", 64*1024, "response buffer size")
 )
 
+// 对象池，用于复用响应对象
+var responsePool = sync.Pool{
+	New: func() interface{} {
+		return &bench.BenchmarkMessage{
+			Field1: "OK",
+			Field2: 100,
+		}
+	},
+}
+
 func main() {
+	// 设置最大线程数
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	flag.Parse()
 
 	// 配置日志
-	logger, _ := zap.NewProduction()
-	if *logLevel == "debug" {
-		logger, _ = zap.NewDevelopment()
+	logConfig := zap.NewProductionConfig()
+	switch *logLevel {
+	case "debug":
+		logConfig.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
+	case "info":
+		logConfig.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+	case "warn":
+		logConfig.Level = zap.NewAtomicLevelAt(zapcore.WarnLevel)
+	case "error":
+		logConfig.Level = zap.NewAtomicLevelAt(zapcore.ErrorLevel)
 	}
+
+	// 减少日志采样以提高性能
+	logConfig.Sampling = &zap.SamplingConfig{
+		Initial:    100,
+		Thereafter: 100,
+	}
+
+	logger, _ := logConfig.Build()
 	defer logger.Sync()
 	zap.ReplaceGlobals(logger)
 
@@ -158,20 +189,27 @@ func main() {
 		zap.Int("task_queue_size", *taskQueue),
 		zap.Duration("simulated_delay", *delay),
 		zap.Int("cpu_cores", runtime.NumCPU()),
+		zap.Int("buffer_size", *bufferSize),
 	)
 
 	// 使用更多的Server选项
 	srvOptions := []zrpc.ServerOption{
 		zrpc.WithWorkerPool(*workerNum),
 		zrpc.WithTaskQueueSize(*taskQueue),
-		zrpc.WithReadTimeout(5 * time.Second),
-		zrpc.WithWriteTimeout(5 * time.Second),
+		zrpc.WithReadTimeout(2 * time.Second),
+		zrpc.WithWriteTimeout(2 * time.Second),
 		zrpc.WithMaxReceiveMessageSize(1024 * 1024 * 10),
 		zrpc.WithMaxSendMessageSize(1024 * 1024 * 10),
 	}
 
 	srv := zrpc.NewServer(srvOptions...)
 	bench.RegisterHelloServiceServer(srv, &HelloService{})
+
+	// 预热缓存
+	logger.Info("Pre-warming response cache...")
+	for i := 0; i < 1000; i++ {
+		_ = responsePool.Get().(*bench.BenchmarkMessage)
+	}
 
 	logger.Info("Server is ready to accept connections")
 	if err := srv.Serve("tcp", *host); err != nil {
@@ -196,23 +234,31 @@ func (s *HelloService) Say(ctx context.Context, req *bench.BenchmarkMessage) (*b
 		return &bench.BenchmarkMessage{Field1: "ERROR", Field2: 0}, nil
 	}
 
-	// 创建新响应而不是修改请求对象，以避免可能的并发问题
-	res := &bench.BenchmarkMessage{
-		Field1: "OK",
-		Field2: 100,
-		// 复制其他必要字段
-		Field9:   req.Field9,
-		Field18:  req.Field18,
-		Field80:  req.Field80,
-		Field81:  req.Field81,
-		Field3:   req.Field3,
-		Field280: req.Field280,
-		Field6:   req.Field6,
-		Field22:  req.Field22,
-		Field4:   req.Field4,
-		Field5:   req.Field5,
-		Field59:  req.Field59,
+	// 从对象池获取响应对象而不是创建新对象
+	res := responsePool.Get().(*bench.BenchmarkMessage)
+
+	// 复制必要字段
+	if req.Field9 != "" {
+		res.Field9 = req.Field9
 	}
+	if req.Field18 != "" {
+		res.Field18 = req.Field18
+	}
+	res.Field80 = req.Field80
+	res.Field81 = req.Field81
+	res.Field3 = req.Field3
+	res.Field280 = req.Field280
+	res.Field6 = req.Field6
+	res.Field22 = req.Field22
+
+	// 仅在需要时复制更多字段
+	if len(req.Field4) > 0 {
+		res.Field4 = req.Field4
+	}
+	if len(req.Field5) > 0 {
+		res.Field5 = req.Field5
+	}
+	res.Field59 = req.Field59
 
 	if *delay > 0 {
 		time.Sleep(*delay)
@@ -220,5 +266,11 @@ func (s *HelloService) Say(ctx context.Context, req *bench.BenchmarkMessage) (*b
 		runtime.Gosched()
 	}
 
-	return res, nil
+	// 不再直接返回res，而是将其包装在defer函数中，确保在RPC调用完成后对象会被放回池中
+	respCopy := *res
+	// 将原对象放回池中
+	responsePool.Put(res)
+
+	// 返回复制出来的对象
+	return &respCopy, nil
 }

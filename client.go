@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crazyfrankie/zrpc/metadata"
@@ -14,6 +15,9 @@ var (
 	ErrNoAvailableConn   = errors.New("zrpc: no available connection")
 	ErrRequestTimeout    = errors.New("zrpc: request timeout")
 	ErrResponseMismatch  = errors.New("zrpc: response sequence mismatch")
+	ErrInvalidArgument   = errors.New("zrpc: invalid argument")
+	ErrConnectionReset   = errors.New("zrpc: connection reset")
+	ErrMaxRetryExceeded  = errors.New("zrpc: max retry exceeded")
 )
 
 type ClientInterface interface {
@@ -49,6 +53,16 @@ type Client struct {
 
 	heartbeatTicker *time.Ticker
 	heartbeatDone   chan struct{}
+
+	// 新增统计指标
+	stats struct {
+		requestCount      atomic.Int64
+		successCount      atomic.Int64
+		errorCount        atomic.Int64
+		timeoutCount      atomic.Int64
+		networkErrorCount atomic.Int64
+		retryCount        atomic.Int64
+	}
 }
 
 // NewClient creates a new channel for the target machine,
@@ -103,6 +117,117 @@ func (c *Client) sendHeartbeat() {
 	c.sendMsg(ctx, conn, call)
 }
 
+// Invoke sends the RPC request on the wire and returns after response is
+// received.  This is typically called by generated code.
+func (c *Client) Invoke(ctx context.Context, method string, args any, reply any) error {
+	c.stats.requestCount.Add(1)
+
+	if args == nil || reply == nil {
+		c.stats.errorCount.Add(1)
+		return ErrInvalidArgument
+	}
+
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); !ok && c.opt.requestTimeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, c.opt.requestTimeout)
+		defer cancel()
+	}
+
+	// Start the retry loop
+	var lastErr error
+	for retry := 0; retry <= c.opt.maxRetries; retry++ {
+		if retry > 0 {
+			c.stats.retryCount.Add(1)
+
+			select {
+			case <-ctx.Done():
+				c.stats.timeoutCount.Add(1)
+				return ctx.Err()
+			default:
+			}
+
+			// Indexes retreat and wait
+			if retry > 1 && c.opt.retryBackoff > 0 {
+				backoff := c.opt.retryBackoff * time.Duration(1<<uint(retry-1))
+				if backoff > c.opt.maxRetryBackoff {
+					backoff = c.opt.maxRetryBackoff
+				}
+
+				timer := time.NewTimer(backoff)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					c.stats.timeoutCount.Add(1)
+					return ctx.Err()
+				case <-timer.C:
+				}
+			}
+		}
+
+		conn, err := c.pool.get()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Ensure that connections are put back into the pool or shut down
+		connReleased := false
+		defer func() {
+			if !connReleased {
+				c.pool.put(conn)
+			}
+		}()
+
+		call, err := newCall(method, args)
+		if err != nil {
+			c.stats.errorCount.Add(1)
+			return err
+		}
+
+		c.mu.Lock()
+		if c.closing || c.shutdown {
+			c.mu.Unlock()
+			c.stats.errorCount.Add(1)
+			return ErrClientConnClosing
+		}
+		c.mu.Unlock()
+
+		err = c.sendMsg(ctx, conn, call)
+		if err != nil {
+			// Connection send failed,
+			// close the connection instead of putting it back into the pool
+			connReleased = true
+			conn.Close()
+			c.stats.networkErrorCount.Add(1)
+			lastErr = err
+			continue
+		}
+
+		err = c.recvMsg(ctx, conn, reply)
+
+		// Mark the connection as released and
+		// put it back into the connection pool
+		connReleased = true
+		c.pool.put(conn)
+
+		if err != nil {
+			c.stats.errorCount.Add(1)
+			lastErr = err
+			continue
+		}
+
+		c.stats.successCount.Add(1)
+		return nil
+	}
+
+	if lastErr != nil {
+		return lastErr
+	}
+
+	c.stats.errorCount.Add(1)
+	return ErrMaxRetryExceeded
+}
+
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -121,18 +246,15 @@ func (c *Client) Close() {
 	}
 
 	if c.pool != nil {
-		c.pool.mu.Lock()
-		for _, conn := range c.pool.conns {
-			conn.Close()
-		}
-		c.pool.conns = nil
-		c.pool.mu.Unlock()
+		c.pool.Close()
 	}
 
 	// clear all pending requests
 	for _, call := range c.pending {
 		call.Err = ErrClientConnClosing
+		call.done()
 	}
+	c.pending = nil
 }
 
 func GetMeta(ctx context.Context) (metadata.MD, bool) {

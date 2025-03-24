@@ -54,7 +54,6 @@ type Server struct {
 	workerWait sync.WaitGroup
 }
 
-// worker 是工作线程结构
 type worker struct {
 	tasks  chan task
 	quit   chan struct{}
@@ -127,26 +126,31 @@ func (s *Server) initWorkerPool() {
 // dispatch for task distribution
 func (s *Server) dispatch() {
 	for t := range s.taskQueue {
-		// find an idle worker thread to process the task
-		for _, w := range s.workerPool {
-			select {
-			case w.tasks <- t:
-				goto NEXT
-			default:
-				// worker thread is busy, move on to the next one.
+		processTask := func(task task) bool {
+			// find an idle worker thread to process the task
+			for _, w := range s.workerPool {
+				select {
+				case w.tasks <- task:
+					return true
+				default:
+					// worker thread is busy, move on to the next one.
+				}
 			}
+			return false // All worker are busy
+		}
+
+		// Trying to assign tasks
+		if processTask(t) {
+			continue
 		}
 
 		// if all worker threads are busy, wait and retry
 		time.Sleep(time.Millisecond)
 		select {
 		case s.workerPool[0].tasks <- t: // try to put in the first worker thread
-		case <-time.After(time.Second): // 超时后直接处理
+		case <-time.After(time.Second):
 			go s.doProcessOneRequest(t.ctx, t.req, t.conn)
 		}
-
-	NEXT:
-		continue
 	}
 }
 
@@ -469,7 +473,6 @@ func (s *Server) stop(graceful bool) {
 	s.lis.Close()
 	s.mu.Unlock()
 
-	// 关闭工作池
 	if s.opt.enableWorkerPool {
 		close(s.taskQueue)
 		for _, w := range s.workerPool {

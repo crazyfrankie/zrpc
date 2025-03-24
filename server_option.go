@@ -26,10 +26,10 @@ type serverOption struct {
 	AuthFunc        func(ctx context.Context, req *protocol.Message, token string) error
 	ServerErrorFunc func(res *protocol.Message, err error) string
 
-	// 工作池相关配置
 	enableWorkerPool bool
 	workerPoolSize   int
 	taskQueueSize    int
+	enableDebug      bool // 启用调试模式，会输出更多日志
 }
 
 var defaultServerOption = &serverOption{
@@ -40,6 +40,7 @@ var defaultServerOption = &serverOption{
 	enableWorkerPool:      false,
 	workerPoolSize:        defaultWorkerPoolSize,
 	taskQueueSize:         defaultTaskQueueSize,
+	enableDebug:           false,
 }
 
 type ServerOption func(*serverOption)
@@ -74,7 +75,6 @@ func WithMaxSendMessageSize(max int) ServerOption {
 	}
 }
 
-// 工作池相关选项
 func WithWorkerPool(size int) ServerOption {
 	return func(opt *serverOption) {
 		opt.enableWorkerPool = true
@@ -89,5 +89,12 @@ func WithTaskQueueSize(size int) ServerOption {
 		if size > 0 {
 			opt.taskQueueSize = size
 		}
+	}
+}
+
+// WithDebug 启用调试模式，会输出更多日志
+func WithDebug() ServerOption {
+	return func(opt *serverOption) {
+		opt.enableDebug = true
 	}
 }
