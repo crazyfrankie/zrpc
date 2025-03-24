@@ -3,6 +3,7 @@ package zrpc
 import (
 	"bufio"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -45,27 +46,27 @@ func (p *connPool) get() (*clientConn, error) {
 		return nil, ErrClientConnClosing
 	}
 
-	// try to get a connection from the available connection pool
 	select {
 	case conn := <-p.available:
 		if conn != nil && !conn.isClosed() && conn.isHealthy() {
 			conn.markInUse()
 			return conn, nil
 		}
-		// If the connection is unhealthy, close and try to create a new one
 		if conn != nil {
 			conn.Close()
 			atomic.AddInt32(&p.created, -1)
 		}
 	default:
+		// No connection available, continue trying to create a new connection
 	}
 
 	p.mu.Lock()
-	if atomic.LoadInt32(&p.created) < int32(p.size) {
+	currentCreated := atomic.LoadInt32(&p.created)
+	if currentCreated < int32(p.size) {
 		conn, err := newClientConn(p.dialer, p.target)
 		if err != nil {
 			p.mu.Unlock()
-			return nil, err
+			return nil, fmt.Errorf("failed to create new connection: %w", err)
 		}
 		p.conns = append(p.conns, conn)
 		atomic.AddInt32(&p.created, 1)
@@ -76,10 +77,15 @@ func (p *connPool) get() (*clientConn, error) {
 	}
 	p.mu.Unlock()
 
+	// If the connection pool size limit is reached, wait for available connections
 	var conn *clientConn
-	baseWait := 10 * time.Millisecond
 
-	for i := 0; i < 5; i++ {
+	// use an increased backoff time, starting at 10ms and waiting up to 160ms
+	baseWait := 10 * time.Millisecond
+	maxRetries := 5
+
+	for i := 0; i < maxRetries; i++ {
+		// calculate this wait time
 		waitTime := baseWait * time.Duration(1<<uint(i))
 
 		select {
@@ -91,8 +97,27 @@ func (p *connPool) get() (*clientConn, error) {
 			if conn != nil {
 				conn.Close()
 				atomic.AddInt32(&p.created, -1)
+
+				// connection is not available, but resources have been reclaimed,
+				// try to create a new connection.
+				p.mu.Lock()
+				if atomic.LoadInt32(&p.created) < int32(p.size) {
+					conn, err := newClientConn(p.dialer, p.target)
+					if err != nil {
+						p.mu.Unlock()
+						continue // failed to create, continue to wait
+					}
+					p.conns = append(p.conns, conn)
+					atomic.AddInt32(&p.created, 1)
+					p.mu.Unlock()
+
+					conn.markInUse()
+					return conn, nil
+				}
+				p.mu.Unlock()
 			}
 		case <-time.After(waitTime):
+			// continue retrying after timeout
 			continue
 		}
 	}

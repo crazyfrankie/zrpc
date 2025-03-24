@@ -27,6 +27,13 @@ const (
 	ReadBufferSize = 1024
 )
 
+type task struct {
+	ctx    context.Context
+	req    *protocol.Message
+	conn   net.Conn
+	server *Server
+}
+
 // Server represents an RPC Server.
 type Server struct {
 	lis        net.Listener
@@ -41,6 +48,44 @@ type Server struct {
 	handleMsgCount int32
 	inShutdown     int32
 	done           chan struct{}
+
+	taskQueue  chan task
+	workerPool []*worker
+	workerWait sync.WaitGroup
+}
+
+// worker 是工作线程结构
+type worker struct {
+	tasks  chan task
+	quit   chan struct{}
+	server *Server
+	id     int
+}
+
+func newWorker(id int, server *Server) *worker {
+	return &worker{
+		tasks:  make(chan task),
+		quit:   make(chan struct{}),
+		server: server,
+		id:     id,
+	}
+}
+
+func (w *worker) start() {
+	go func() {
+		for {
+			select {
+			case t := <-w.tasks:
+				w.server.doProcessOneRequest(t.ctx, t.req, t.conn)
+			case <-w.quit:
+				return
+			}
+		}
+	}()
+}
+
+func (w *worker) stop() {
+	close(w.quit)
 }
 
 // NewServer returns a new rpc server
@@ -57,7 +102,52 @@ func NewServer(opts ...ServerOption) *Server {
 	}
 	s.cv = sync.NewCond(&s.mu)
 
+	if opt.enableWorkerPool {
+		s.initWorkerPool()
+	}
+
 	return s
+}
+
+// initWorkerPool Initialize the work pool
+func (s *Server) initWorkerPool() {
+	s.taskQueue = make(chan task, s.opt.taskQueueSize)
+	s.workerPool = make([]*worker, s.opt.workerPoolSize)
+
+	for i := 0; i < s.opt.workerPoolSize; i++ {
+		w := newWorker(i, s)
+		s.workerPool[i] = w
+		w.start()
+		s.workerWait.Add(1)
+	}
+
+	go s.dispatch()
+}
+
+// dispatch for task distribution
+func (s *Server) dispatch() {
+	for t := range s.taskQueue {
+		// find an idle worker thread to process the task
+		for _, w := range s.workerPool {
+			select {
+			case w.tasks <- t:
+				goto NEXT
+			default:
+				// worker thread is busy, move on to the next one.
+			}
+		}
+
+		// if all worker threads are busy, wait and retry
+		time.Sleep(time.Millisecond)
+		select {
+		case s.workerPool[0].tasks <- t: // try to put in the first worker thread
+		case <-time.After(time.Second): // 超时后直接处理
+			go s.doProcessOneRequest(t.ctx, t.req, t.conn)
+		}
+
+	NEXT:
+		continue
+	}
 }
 
 // Serve starts and listens RPC requests.
@@ -159,7 +249,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			conn.SetWriteDeadline(time.Now().Add(d))
 		}
 		if err := tlsConn.Handshake(); err != nil {
-			zap.L().Error(fmt.Sprintf("rpcx: TLS handshake error from %s: %v", conn.RemoteAddr(), err))
+			zap.L().Error(fmt.Sprintf("zrpc: TLS handshake error from %s: %v", conn.RemoteAddr(), err))
 			return
 		}
 	}
@@ -184,7 +274,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			} else if errors.Is(err, net.ErrClosed) {
 				zap.L().Info("zrpc: connection is closed:", zap.String("addr", conn.RemoteAddr().String()))
 			} else { // wrong data
-				zap.L().Warn("rpcx: failed to read request: ", zap.String("err", err.Error()))
+				zap.L().Warn("zrpc: failed to read request: ", zap.String("err", err.Error()))
 			}
 
 			return
@@ -212,7 +302,16 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			continue
 		}
 
-		go s.processOneRequest(ctx, req, conn)
+		if s.opt.enableWorkerPool {
+			select {
+			case s.taskQueue <- task{ctx: ctx, req: req, conn: conn, server: s}:
+			default:
+				// queue full, process directly
+				go s.processOneRequest(ctx, req, conn)
+			}
+		} else {
+			go s.processOneRequest(ctx, req, conn)
+		}
 	}
 }
 
@@ -228,6 +327,12 @@ func (s *Server) readRequest(r io.Reader) (*protocol.Message, error) {
 	return req, err
 }
 
+// doProcessOneRequest is the encapsulated workpool's processing method.
+func (s *Server) doProcessOneRequest(ctx context.Context, req *protocol.Message, conn net.Conn) {
+	s.processOneRequest(ctx, req, conn)
+}
+
+// processOneRequest raw processing request method
 func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -259,7 +364,7 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 	svc, ok := s.serviceMap.Load(req.ServiceName)
 	srv, _ := svc.(*service)
 	if !ok {
-		err = errors.New("rpcx: can't find service " + req.ServiceName)
+		err = errors.New("zrpc: can't find service " + req.ServiceName)
 	}
 
 	res := req.Clone()
@@ -283,7 +388,7 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 			s.handleError(res, err)
 		}
 		if err != nil {
-			zap.L().Error("rpcx: failed to handle request: ", zap.Error(err))
+			zap.L().Error("zrpc: failed to handle request: ", zap.Error(err))
 		}
 	}
 
@@ -364,6 +469,14 @@ func (s *Server) stop(graceful bool) {
 	s.lis.Close()
 	s.mu.Unlock()
 
+	// 关闭工作池
+	if s.opt.enableWorkerPool {
+		close(s.taskQueue)
+		for _, w := range s.workerPool {
+			w.stop()
+		}
+	}
+
 	s.serveWG.Wait()
 
 	if graceful {
@@ -422,4 +535,19 @@ func isRecoverableError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// MethodInfo contains the information of an RPC including its method name and type.
+type MethodInfo struct {
+	Name string
+}
+
+type ServiceInfo struct {
+	Methods []MethodInfo
+	// Metadata is the metadata specified in ServiceDesc when registering service.
+	Metadata any
+}
+
+func (s *Server) GetServiceInfo() map[string]ServiceInfo {
+	return nil
 }

@@ -265,6 +265,9 @@ func encodeMetadata(md metadata.MD, buf *bytes.Buffer) {
 	}
 }
 
+// 目前有关缓冲区的调用都是你刚刚提供的，我现在有几个疑问：第一个就是Encode为什么要返回Buffer而不是BufferSlice，换成BufferSlice是否会更好，因为在codec包中的Marshal和U你Marshal都采用BufferSlice作为基本单位，
+// 第二个，mem包中的Reader和Writer都不需要使用吗？不是说它们在网络操作中比较好吗？是否可以应用上去？
+
 func (m *Message) Decode(r io.Reader, maxLength int) error {
 	defer func() {
 		if err := recover(); err != nil {

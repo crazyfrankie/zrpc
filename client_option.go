@@ -10,7 +10,7 @@ const (
 	defaultClientMaxReceiveMessageSize = 1024 * 1024 * 5
 	defaultClientMaxSendMessageSize    = math.MaxInt32
 	defaultConnectTimeout              = 20 * time.Second
-	defaultMaxPoolSize                 = 30
+	defaultMaxPoolSize                 = 50
 	defaultHeartbeatInterval           = 30 * time.Second
 	defaultHeartbeatTimeout            = 5 * time.Second
 )

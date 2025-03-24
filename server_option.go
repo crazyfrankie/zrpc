@@ -3,14 +3,17 @@ package zrpc
 import (
 	"context"
 	"crypto/tls"
-	"github.com/crazyfrankie/zrpc/protocol"
 	"math"
 	"time"
+
+	"github.com/crazyfrankie/zrpc/protocol"
 )
 
 const (
 	defaultServerMaxReceiveMessageSize = 1024 * 1024 * 5
 	defaultServerMaxSendMessageSize    = math.MaxInt32
+	defaultWorkerPoolSize              = 10
+	defaultTaskQueueSize               = 10000
 )
 
 type serverOption struct {
@@ -22,6 +25,11 @@ type serverOption struct {
 	// AuthFunc can be used to auth.
 	AuthFunc        func(ctx context.Context, req *protocol.Message, token string) error
 	ServerErrorFunc func(res *protocol.Message, err error) string
+
+	// 工作池相关配置
+	enableWorkerPool bool
+	workerPoolSize   int
+	taskQueueSize    int
 }
 
 var defaultServerOption = &serverOption{
@@ -29,6 +37,9 @@ var defaultServerOption = &serverOption{
 	writeTimeout:          time.Second * 120,
 	maxReceiveMessageSize: defaultServerMaxReceiveMessageSize,
 	maxSendMessageSize:    defaultServerMaxSendMessageSize,
+	enableWorkerPool:      false,
+	workerPoolSize:        defaultWorkerPoolSize,
+	taskQueueSize:         defaultTaskQueueSize,
 }
 
 type ServerOption func(*serverOption)
@@ -60,5 +71,23 @@ func WithMaxReceiveMessageSize(max int) ServerOption {
 func WithMaxSendMessageSize(max int) ServerOption {
 	return func(opt *serverOption) {
 		opt.maxSendMessageSize = max
+	}
+}
+
+// 工作池相关选项
+func WithWorkerPool(size int) ServerOption {
+	return func(opt *serverOption) {
+		opt.enableWorkerPool = true
+		if size > 0 {
+			opt.workerPoolSize = size
+		}
+	}
+}
+
+func WithTaskQueueSize(size int) ServerOption {
+	return func(opt *serverOption) {
+		if size > 0 {
+			opt.taskQueueSize = size
+		}
 	}
 }

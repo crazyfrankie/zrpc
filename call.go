@@ -35,25 +35,29 @@ func (c *Client) Invoke(ctx context.Context, method string, args any, reply any)
 	go func() {
 		conn, err := c.pool.get()
 		if err != nil {
-			done <- err
+			done <- fmt.Errorf("failed to get connection: %w", err)
 			return
 		}
 		defer c.pool.put(conn)
 
 		if err := c.sendMsg(ctx, conn, call); err != nil {
-			done <- err
+			done <- fmt.Errorf("failed to send request: %w", err)
 			return
 		}
 
 		err = c.recvMsg(ctx, conn, reply)
-		done <- err
+		if err != nil {
+			done <- fmt.Errorf("failed to receive response: %w", err)
+			return
+		}
+
+		done <- nil
 	}()
 
 	select {
 	case <-ctx.Done():
-		// Try to clean up pending requests when the context is canceled
 		c.cleanupCall(call)
-		return ctx.Err()
+		return fmt.Errorf("request timeout or canceled: %w", ctx.Err())
 	case err := <-done:
 		return err
 	}
