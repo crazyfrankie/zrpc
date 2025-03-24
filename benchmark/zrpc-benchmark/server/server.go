@@ -127,7 +127,7 @@ var (
 	host       = flag.String("host", "127.0.0.1:8082", "listened ip and port")
 	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 	delay      = flag.Duration("delay", 0, "delay to mock business processing")
-	workerNum  = flag.Int("worker_num", runtime.NumCPU()*4, "number of workers for request processing")
+	workerNum  = flag.Int("worker_num", runtime.NumCPU()*6, "number of workers for request processing")
 	taskQueue  = flag.Int("task_queue", 100000, "task queue size for worker pool")
 	pprofPort  = flag.String("pprof", ":6060", "pprof http server address")
 	logLevel   = flag.String("log", "info", "log level: debug, info, warn, error")

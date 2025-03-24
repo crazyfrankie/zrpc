@@ -12,7 +12,7 @@ import (
 const (
 	defaultServerMaxReceiveMessageSize = 1024 * 1024 * 5
 	defaultServerMaxSendMessageSize    = math.MaxInt32
-	defaultWorkerPoolSize              = 10
+	defaultWorkerPoolSize              = 20
 	defaultTaskQueueSize               = 10000
 )
 

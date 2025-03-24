@@ -8,71 +8,122 @@ import (
 	"unsafe"
 )
 
+const (
+	FileChunkSize     = 16 * 1024
+	CompressThreshold = 1024 // 1KB
+)
+
 var (
 	spWriter sync.Pool
 	spReader sync.Pool
-	spBuffer sync.Pool
+
+	bufferPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, FileChunkSize)
+			return &buf
+		},
+	}
 )
 
 func init() {
 	spWriter = sync.Pool{New: func() interface{} {
-		return gzip.NewWriter(nil)
+		w, _ := gzip.NewWriterLevel(nil, gzip.BestSpeed)
+		return w
 	}}
 	spReader = sync.Pool{New: func() interface{} {
 		return new(gzip.Reader)
 	}}
-	spBuffer = sync.Pool{New: func() interface{} {
-		return bytes.NewBuffer(nil)
-	}}
 }
 
-// unzip unzips data.
 func unzip(data []byte) ([]byte, error) {
-	buf := bytes.NewBuffer(data)
+	if len(data) == 0 {
+		return nil, nil
+	}
 
 	gr := spReader.Get().(*gzip.Reader)
-	defer func() {
-		spReader.Put(gr)
-	}()
-	err := gr.Reset(buf)
-	if err != nil {
-		return nil, err
-	}
-	defer gr.Close()
 
-	data, err = io.ReadAll(gr)
+	br := bytes.NewReader(data)
+
+	if err := gr.Reset(br); err != nil {
+		spReader.Put(gr)
+		return nil, err
+	}
+
+	estimatedSize := len(data) * 5
+	if estimatedSize < 4*1024 {
+		estimatedSize = 4 * 1024
+	}
+
+	result := bytes.NewBuffer(make([]byte, 0, estimatedSize))
+
+	tmpBufPtr := bufferPool.Get().(*[]byte)
+	tmpBuf := *tmpBufPtr
+
+	var err error
+
+	defer func() {
+		gr.Close()
+		spReader.Put(gr)
+		bufferPool.Put(tmpBufPtr)
+	}()
+
+	for {
+		n, readErr := gr.Read(tmpBuf)
+		if n > 0 {
+			if _, writeErr := result.Write(tmpBuf[:n]); writeErr != nil {
+				return nil, writeErr
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+
+		if readErr != nil {
+			err = readErr
+			break
+		}
+	}
+
 	if err != nil {
 		return nil, err
 	}
-	return data, err
+
+	return result.Bytes(), nil
 }
 
-// zip zips data.
 func zip(data []byte) ([]byte, error) {
-	buf := spBuffer.Get().(*bytes.Buffer)
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if len(data) < CompressThreshold {
+	}
+
+	estimatedSize := int(float64(len(data)) * 0.8)
+	if estimatedSize < 1024 {
+		estimatedSize = 1024
+	}
+
 	w := spWriter.Get().(*gzip.Writer)
-	w.Reset(buf)
+
+	result := bytes.NewBuffer(make([]byte, 0, estimatedSize))
+
+	w.Reset(result)
 
 	defer func() {
-		buf.Reset()
-		spBuffer.Put(buf)
 		w.Close()
 		spWriter.Put(w)
 	}()
-	_, err := w.Write(data)
-	if err != nil {
+
+	if _, err := w.Write(data); err != nil {
 		return nil, err
 	}
-	err = w.Flush()
-	if err != nil {
+
+	if err := w.Close(); err != nil {
 		return nil, err
 	}
-	err = w.Close()
-	if err != nil {
-		return nil, err
-	}
-	dec := buf.Bytes()
-	return dec, nil
+
+	return result.Bytes(), nil
 }
 
 func SliceByteToString(b []byte) string {

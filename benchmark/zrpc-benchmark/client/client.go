@@ -1,4 +1,21 @@
 /*
+client: poolSize: 2000
+server: workerNum: runtime.NumCPU()*6
+{"level":"info","ts":1742802185.7984157,"caller":"client/client.go:98","msg":"Starting benchmark","concurrency":100,"requests_per_client":10000,"total_requests":1000000,"pool_size":2000,"conn_timeout":3,"req_timeout":5,"warmup":1000,"batch_size":50,"cpu_cores":16}
+{"level":"info","ts":1742802185.7984653,"caller":"client/client.go:127","msg":"Warming up..."}
+{"level":"info","ts":1742802185.8915365,"caller":"client/client.go:129","msg":"Warm-up complete"}
+{"level":"info","ts":1742802202.2898283,"caller":"client/client.go:240","msg":"took 16335 ms for 1000000 requests"}
+{"level":"info","ts":1742802202.4650855,"caller":"client/client.go:261","msg":"sent     requests    : 1000000\n"}
+{"level":"info","ts":1742802202.465144,"caller":"client/client.go:262","msg":"received requests    : 1000000\n"}
+{"level":"info","ts":1742802202.4651492,"caller":"client/client.go:263","msg":"received requests_OK : 1000000\n"}
+{"level":"info","ts":1742802202.465153,"caller":"client/client.go:264","msg":"error    requests    : 0\n"}
+{"level":"info","ts":1742802202.4651577,"caller":"client/client.go:265","msg":"success  rate        : 100.00%\n"}
+{"level":"info","ts":1742802202.465162,"caller":"client/client.go:266","msg":"throughput  (TPS)    : 61218\n"}
+{"level":"info","ts":1742802202.4651673,"caller":"client/client.go:267","msg":"mean: 72434956 ns, median: 71343850 ns, max: 573502937 ns, min: 26220 ns, p99: 536236587 ns\n"}
+{"level":"info","ts":1742802202.4651723,"caller":"client/client.go:268","msg":"mean: 72 ms, median: 71 ms, max: 573 ms, min: 0 ms, p99: 536 ms\n"}
+
+client: poolSize: 500
+server: workerNum: runtime.NumCPU()*4
 {"level":"info","ts":1742797565.6278405,"caller":"client/client.go:99","msg":"Starting benchmark","concurrency":100,"requests_per_client":10000,"total_requests":1000000,"pool_size":500,"conn_timeout":3,"req_timeout":5,"warmup":1000,"batch_size":50,"cpu_cores":16}
 {"level":"info","ts":1742797565.6278949,"caller":"client/client.go:128","msg":"Warming up..."}
 {"level":"info","ts":1742797565.7819161,"caller":"client/client.go:130","msg":"Warm-up complete"}
@@ -51,7 +68,7 @@ var (
 	concurrency  = flag.Int("concurrency", runtime.NumCPU()*10, "client concurrency")
 	total        = flag.Int("total", 0, "total requests for client")
 	host         = flag.String("host", "localhost:8082", "server ip and port")
-	poolSize     = flag.Int("pool_size", 500, "connection pool size")
+	poolSize     = flag.Int("pool_size", 2000, "connection pool size")
 	connTimeout  = flag.Duration("conn_timeout", 3*time.Second, "connection timeout")
 	reqTimeout   = flag.Duration("req_timeout", 5*time.Second, "request timeout")
 	retryCount   = flag.Int("retry", 2, "retry count for failed requests")
