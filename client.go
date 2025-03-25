@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/crazyfrankie/zrpc/discovery/etcd"
-	"github.com/crazyfrankie/zrpc/discovery/memory"
 	"sync"
 	"time"
 
 	"github.com/crazyfrankie/zrpc/discovery"
+	"github.com/crazyfrankie/zrpc/discovery/etcd"
+	"github.com/crazyfrankie/zrpc/discovery/memory"
 	"github.com/crazyfrankie/zrpc/metadata"
 )
 
