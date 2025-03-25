@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/crazyfrankie/zrpc/codec"
 	"github.com/crazyfrankie/zrpc/mem"
@@ -15,55 +16,120 @@ import (
 	"github.com/crazyfrankie/zrpc/protocol"
 )
 
-// invokeWithoutRetry sends the RPC request on the wire and returns after response is
+// Invoke sends the RPC request on the wire and returns after response is
 // received.  This is typically called by generated code.
-//
-// DEPRECATED This is the old implementation for internal use,
-// the new implementation is in client.go
-func (c *Client) invokeWithoutRetry(ctx context.Context, method string, args any, reply any) error {
+func (c *Client) Invoke(ctx context.Context, method string, args any, reply any) error {
+	if args == nil || reply == nil {
+		return ErrInvalidArgument
+	}
+
 	var cancel context.CancelFunc
-	if _, ok := ctx.Deadline(); !ok {
+	if _, ok := ctx.Deadline(); !ok && c.opt.requestTimeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, c.opt.requestTimeout)
 		defer cancel()
 	}
 
-	// create a call info
-	call, err := newCall(method, args)
-	if err != nil {
-		return err
-	}
+	// Start the retry loop
+	var lastErr error
+	for retry := 0; retry <= c.opt.maxRetries; retry++ {
+		if retry > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 
-	done := make(chan error, 1)
+			// Indexes retreat and wait
+			if retry > 1 && c.opt.retryBackoff > 0 {
+				backoff := c.opt.retryBackoff * time.Duration(1<<uint(retry-1))
+				if backoff > c.opt.maxRetryBackoff {
+					backoff = c.opt.maxRetryBackoff
+				}
 
-	go func() {
-		conn, err := c.pool.get()
-		if err != nil {
-			done <- fmt.Errorf("failed to get connection: %w", err)
-			return
+				timer := time.NewTimer(backoff)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
+			}
 		}
-		defer c.pool.put(conn)
 
-		if err := c.sendMsg(ctx, conn, call); err != nil {
-			done <- fmt.Errorf("failed to send request: %w", err)
-			return
+		// Get a server using round-robin or user provider selection
+		target, err := c.discovery.Get(c.opt.balancerMode)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		c.mu.RLock()
+		pool, ok := c.pools[target]
+		c.mu.RUnlock()
+
+		if !ok {
+			c.mu.Lock()
+			pool = newConnPool(c, target, c.opt.maxPoolSize)
+			c.pools[target] = pool
+			c.mu.Unlock()
+		}
+
+		conn, err := pool.get()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Ensure that connections are put back into the pool or shut down
+		connReleased := false
+		defer func() {
+			if !connReleased {
+				pool.put(conn)
+			}
+		}()
+
+		call, err := newCall(method, args)
+		if err != nil {
+			return err
+		}
+
+		c.mu.Lock()
+		if c.closing || c.shutdown {
+			c.mu.Unlock()
+			return ErrClientConnClosing
+		}
+		c.mu.Unlock()
+
+		err = c.sendMsg(ctx, conn, call)
+		if err != nil {
+			// Connection send failed,
+			// close the connection instead of putting it back into the pool
+			connReleased = true
+			conn.Close()
+			lastErr = err
+			continue
 		}
 
 		err = c.recvMsg(ctx, conn, reply)
+
+		// Mark the connection as released and
+		// put it back into the connection pool
+		connReleased = true
+		pool.put(conn)
+
 		if err != nil {
-			done <- fmt.Errorf("failed to receive response: %w", err)
-			return
+			lastErr = err
+			continue
 		}
 
-		done <- nil
-	}()
-
-	select {
-	case <-ctx.Done():
-		c.cleanupCall(call)
-		return fmt.Errorf("request timeout or canceled: %w", ctx.Err())
-	case err := <-done:
-		return err
+		return nil
 	}
+
+	if lastErr != nil {
+		return lastErr
+	}
+
+	return ErrMaxRetryExceeded
 }
 
 func (c *Client) sendMsg(ctx context.Context, conn *clientConn, call *Call) error {

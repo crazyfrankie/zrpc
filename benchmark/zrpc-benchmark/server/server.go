@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"github.com/crazyfrankie/zrpc/registry"
 	"net/http"
 	_ "net/http/pprof"
 	"runtime"
@@ -21,7 +22,7 @@ var (
 	host       = flag.String("host", "127.0.0.1:8082", "listened ip and port")
 	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 	delay      = flag.Duration("delay", 0, "delay to mock business processing")
-	workerNum  = flag.Int("worker_num", runtime.NumCPU()*8, "number of workers for request processing")
+	workerNum  = flag.Int("worker_num", runtime.NumCPU()*4, "number of workers for request processing")
 	taskQueue  = flag.Int("task_queue", 100000, "task queue size for worker pool")
 	pprofPort  = flag.String("pprof", ":6060", "pprof http server address")
 	logLevel   = flag.String("log", "info", "log level: debug, info, warn, error")
@@ -98,6 +99,12 @@ func main() {
 
 	srv := zrpc.NewServer(srvOptions...)
 	bench.RegisterHelloServiceServer(srv, &HelloService{})
+
+	client := registry.NewTcpClient("localhost:8084")
+	err := client.Register("bench", *host, nil)
+	if err != nil {
+		panic(err)
+	}
 
 	// 预热缓存
 	logger.Info("Pre-warming response cache...")

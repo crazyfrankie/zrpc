@@ -63,7 +63,7 @@ func init() {
 	}
 }
 
-// DefaultBufferPool returns the default pool
+// DefaultBufferPool returns the memory pool
 func DefaultBufferPool() BufferPool {
 	return &defaultPool
 }

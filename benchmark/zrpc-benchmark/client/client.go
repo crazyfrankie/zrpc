@@ -67,8 +67,7 @@ import (
 var (
 	concurrency  = flag.Int("concurrency", runtime.NumCPU()*10, "client concurrency")
 	total        = flag.Int("total", 0, "total requests for client")
-	host         = flag.String("host", "localhost:8082", "server ip and port")
-	poolSize     = flag.Int("pool_size", 5000, "connection pool size")
+	poolSize     = flag.Int("pool_size", 500, "connection pool size")
 	connTimeout  = flag.Duration("conn_timeout", 3*time.Second, "connection timeout")
 	reqTimeout   = flag.Duration("req_timeout", 5*time.Second, "request timeout")
 	retryCount   = flag.Int("retry", 2, "retry count for failed requests")
@@ -130,9 +129,10 @@ func main() {
 		zrpc.DialWithConnectTimeout(*connTimeout),
 		zrpc.DialWithTCPKeepAlive(30 * time.Second),
 		zrpc.DialWithIdleTimeout(30 * time.Second),
+		zrpc.DialWithRegistryAddress("localhost:8084"),
 	}
 
-	client, err := zrpc.NewClient(*host, clientOptions...)
+	client, err := zrpc.NewClient("registry:///bench", clientOptions...)
 	if err != nil {
 		logger.Fatal("Failed to create client", zap.Error(err))
 	}

@@ -4,6 +4,8 @@ import (
 	"crypto/tls"
 	"math"
 	"time"
+
+	"github.com/crazyfrankie/zrpc/discovery"
 )
 
 const (
@@ -38,6 +40,9 @@ type clientOption struct {
 	maxRetries       int
 	retryBackoff     time.Duration // Retry backoff base time
 	maxRetryBackoff  time.Duration // Maximum retry backoff time
+	balancerMode     discovery.SelectMode
+	registryAddr     string   // TCP registry address
+	etcdEndpoints    []string // Etcd endpoints
 }
 
 func defaultClientOption() *clientOption {
@@ -52,6 +57,7 @@ func defaultClientOption() *clientOption {
 		maxRetries:            defaultMaxRetries,
 		retryBackoff:          defaultRetryBackoff,
 		maxRetryBackoff:       defaultMaxRetryBackoff,
+		balancerMode:          discovery.RoundRobinSelect,
 	}
 }
 
@@ -131,5 +137,26 @@ func DialWithRetryBackoff(backoff time.Duration) ClientOption {
 func DialWithMaxRetryBackoff(maxBackoff time.Duration) ClientOption {
 	return func(opt *clientOption) {
 		opt.maxRetryBackoff = maxBackoff
+	}
+}
+
+// DialWithBalancer sets balancer select mode
+func DialWithBalancer(mode discovery.SelectMode) ClientOption {
+	return func(opt *clientOption) {
+		opt.balancerMode = mode
+	}
+}
+
+// DialWithRegistryAddress setting the Registration Center Address
+func DialWithRegistryAddress(addr string) ClientOption {
+	return func(opt *clientOption) {
+		opt.registryAddr = addr
+	}
+}
+
+// DialWithEtcdEndpoints setting up an etcd endpoint
+func DialWithEtcdEndpoints(endpoints []string) ClientOption {
+	return func(opt *clientOption) {
+		opt.etcdEndpoints = endpoints
 	}
 }

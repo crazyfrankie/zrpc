@@ -342,7 +342,7 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 		if r := recover(); r != nil {
 			buf := make([]byte, 1024)
 			buf = buf[:runtime.Stack(buf, true)]
-			zap.L().Error(fmt.Sprintf("[handler internal error]: servicepath: %s, servicemethod: %s, err: %v，stacks: %s", req.ServiceName, req.ServiceMethod, r, string(buf)))
+			zap.L().Error(fmt.Sprintf("[handler memory error]: servicepath: %s, servicemethod: %s, err: %v，stacks: %s", req.ServiceName, req.ServiceMethod, r, string(buf)))
 		}
 	}()
 
