@@ -181,10 +181,10 @@ func (d *Discovery) Close() error {
 
 // getKeyPrefix Get the key prefix of the service in etcd
 func (d *Discovery) getKeyPrefix() string {
-	return fmt.Sprintf("/service/%s/", d.serviceName)
+	return fmt.Sprintf("service/%s/", d.serviceName)
 }
 
 // getKey Get the key for the service in etcd.
 func (d *Discovery) getKey(addr string) string {
-	return fmt.Sprintf("/service/%s/%s", d.serviceName, addr)
+	return fmt.Sprintf("service/%s/%s", d.serviceName, addr)
 }

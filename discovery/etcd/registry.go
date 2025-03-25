@@ -47,7 +47,7 @@ func RegisterService(addr []string, serviceName, serviceAddr string, metadata ma
 	}
 	leaseID := leaseResp.ID
 
-	key := fmt.Sprintf("/services/%s/%s", serviceName, serviceAddr)
+	key := fmt.Sprintf("service/%s/%s", serviceName, serviceAddr)
 	val := endpoints.Endpoint{
 		Addr:     serviceAddr,
 		Metadata: metadata,
@@ -62,14 +62,16 @@ func RegisterService(addr []string, serviceName, serviceAddr string, metadata ma
 		val:     val,
 		ttl:     ttl,
 	}
-	registry.em, err = endpoints.NewManager(cli, serviceName)
+
+	target := fmt.Sprintf("service/%s", serviceName)
+	registry.em, err = endpoints.NewManager(cli, target)
 	if err != nil {
 		return nil, err
 	}
 
 	ctx, cancel = context.WithTimeout(ctx, time.Second*2)
 	defer cancel()
-	err = registry.em.AddEndpoint(ctx, key, val)
+	err = registry.em.AddEndpoint(ctx, key, val, clientv3.WithLease(leaseResp.ID))
 	if err != nil {
 		return nil, err
 	}
