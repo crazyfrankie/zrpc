@@ -29,7 +29,7 @@ type serverOption struct {
 	enableWorkerPool bool
 	workerPoolSize   int
 	taskQueueSize    int
-	enableDebug      bool // 启用调试模式，会输出更多日志
+	enableDebug      bool
 }
 
 var defaultServerOption = &serverOption{
@@ -92,7 +92,6 @@ func WithTaskQueueSize(size int) ServerOption {
 	}
 }
 
-// WithDebug 启用调试模式，会输出更多日志
 func WithDebug() ServerOption {
 	return func(opt *serverOption) {
 		opt.enableDebug = true

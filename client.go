@@ -62,7 +62,7 @@ type Client struct {
 // target can be one of:
 // - "localhost:8080" - direct server address
 // - "registry:///serviceName" - service name in the registry (uses the optional registryAddr from options)
-// - "etcd:///serviceName" - service name in etcd (uses the etcd endpoints from options)
+// - "etcd:///service/serviceName" - service name in etcd (uses the etcd endpoints from options)
 func NewClient(target string, opts ...ClientOption) (*Client, error) {
 	client := &Client{
 		opt:     defaultClientOption(),
@@ -88,7 +88,7 @@ func NewClient(target string, opts ...ClientOption) (*Client, error) {
 
 func (c *Client) parserTarget(target string) error {
 	// Parse the target string to determine the discovery method
-	// registry:///serviceName, etcd:///serviceName, or direct server address
+	// registry:///serviceName, etcd:///service/serviceName, or direct server address
 	if len(target) > 0 {
 		switch {
 		case target == "":
