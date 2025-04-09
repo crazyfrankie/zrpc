@@ -3,6 +3,7 @@ package zrpc
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -322,6 +323,25 @@ func newClientConn(c *Client, target string) (*clientConn, error) {
 			tcpConn.SetKeepAlive(true)
 			tcpConn.SetKeepAlivePeriod(c.opt.tcpKeepAlivePeriod)
 		}
+	}
+
+	if c.opt.tls != nil {
+		tlsConn := tls.Client(conn, c.opt.tls)
+
+		if c.opt.connectTimeout > 0 {
+			conn.SetDeadline(time.Now().Add(c.opt.connectTimeout))
+		}
+
+		if err := tlsConn.Handshake(); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+
+		if c.opt.connectTimeout > 0 {
+			conn.SetDeadline(time.Time{})
+		}
+
+		conn = tlsConn
 	}
 
 	now := time.Now()
