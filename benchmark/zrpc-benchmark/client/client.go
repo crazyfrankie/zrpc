@@ -127,8 +127,10 @@ func main() {
 	clientOptions := []zrpc.ClientOption{
 		zrpc.DialWithMaxPoolSize(*poolSize),
 		zrpc.DialWithConnectTimeout(*connTimeout),
-		zrpc.DialWithTCPKeepAlive(30 * time.Second),
+		zrpc.DialWithTCPKeepAlive(15 * time.Second),
 		zrpc.DialWithIdleTimeout(30 * time.Second),
+		zrpc.DialWithHeartbeatInterval(30 * time.Second),
+		zrpc.DialWithHeartbeatTimeout(5 * time.Second),
 		zrpc.DialWithRegistryAddress("localhost:8084"),
 	}
 

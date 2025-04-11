@@ -13,26 +13,37 @@ const (
 	defaultClientMaxSendMessageSize    = math.MaxInt32
 	defaultConnectTimeout              = 20 * time.Second
 	defaultMaxPoolSize                 = 50
-	defaultHeartbeatInterval           = 30 * time.Second
-	defaultHeartbeatTimeout            = 5 * time.Second
-	defaultRequestTimeout              = 30 * time.Second
-	defaultMaxRetries                  = 2
-	defaultRetryBackoff                = 100 * time.Millisecond
-	defaultMaxRetryBackoff             = 1 * time.Second
+	// Application layer heartbeat defaults to 30 seconds, used to check the health of the service
+	// If the heartbeat fails, the connection is closed and re-established.
+	defaultHeartbeatInterval = 30 * time.Second
+	// Heartbeat timeout of 5 seconds
+	defaultHeartbeatTimeout = 5 * time.Second
+	// TCP keep-alive defaults to 15 seconds, used to detect network connection state
+	// If 0, TCP keep-alive is not enabled and relies solely on the application layer heartbeat
+	defaultTCPKeepAlivePeriod = 15 * time.Second
+	defaultRequestTimeout     = 30 * time.Second
+	defaultMaxRetries         = 2
+	defaultRetryBackoff       = 100 * time.Millisecond
+	defaultMaxRetryBackoff    = 1 * time.Second
 )
 
 type clientOption struct {
 	tls *tls.Config
 	// connectTimeout sets timeout for dialing
 	connectTimeout time.Duration
-	// tcpKeepAlivePeriod if it is zero we don't set keepalive
+	// tcpKeepAlivePeriod is used to detect the state of the network connection
+	// If 0, TCP keep-alive is not enabled and relies solely on the application layer heartbeat
+	// Recommended setting is 15-30 seconds for quick detection of network problems.
 	tcpKeepAlivePeriod time.Duration
 	// idleTimeout sets max idle time for underlying net.Conns
 	idleTimeout           time.Duration
 	maxPoolSize           int
 	maxReceiveMessageSize int
 	maxSendMessageSize    int
-	// heartbeatInterval sets interval for sending heartbeat
+	// heartbeatInterval is used to check the health of the service
+	// If 0, the application layer heartbeat is not enabled.
+	// Recommended to be set to 30-60 seconds to check if the service is running properly
+	// If the heartbeat fails, the connection will be closed and re-established.
 	heartbeatInterval time.Duration
 	// heartbeatTimeout sets timeout for heartbeat request
 	heartbeatTimeout time.Duration
@@ -53,6 +64,7 @@ func defaultClientOption() *clientOption {
 		maxPoolSize:           defaultMaxPoolSize,
 		heartbeatInterval:     defaultHeartbeatInterval,
 		heartbeatTimeout:      defaultHeartbeatTimeout,
+		tcpKeepAlivePeriod:    defaultTCPKeepAlivePeriod,
 		requestTimeout:        defaultRequestTimeout,
 		maxRetries:            defaultMaxRetries,
 		retryBackoff:          defaultRetryBackoff,

@@ -11,6 +11,7 @@ import (
 	"github.com/crazyfrankie/zrpc/discovery/etcd"
 	"github.com/crazyfrankie/zrpc/discovery/memory"
 	"github.com/crazyfrankie/zrpc/metadata"
+	"go.uber.org/zap"
 )
 
 var (
@@ -197,25 +198,47 @@ func (c *Client) sendHeartbeat() {
 	// Get a server using random selection for heartbeat
 	target, err := c.discovery.Get(discovery.RandomSelect)
 	if err != nil {
+		zap.L().Warn("failed to get server for heartbeat", zap.Error(err))
 		return
 	}
 
 	pool, ok := c.pools[target]
 	if !ok {
+		zap.L().Warn("connection pool not found for heartbeat", zap.String("target", target))
 		return
 	}
 
 	conn, err := pool.get()
 	if err != nil {
+		zap.L().Warn("failed to get connection for heartbeat",
+			zap.String("target", target),
+			zap.Error(err))
 		return
 	}
 	defer pool.put(conn)
+
+	// check connection health
+	if !conn.isHealthy() {
+		zap.L().Warn("connection unhealthy for heartbeat",
+			zap.String("target", target))
+		// unhealthy connection, close connection
+		conn.Close()
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.opt.heartbeatTimeout)
 	defer cancel()
 
 	call := &Call{}
-	c.sendMsg(ctx, conn, call)
+	err = c.sendMsg(ctx, conn, call)
+	if err != nil {
+		zap.L().Warn("failed to send heartbeat",
+			zap.String("target", target),
+			zap.Error(err))
+		// heartbeat failed, close connection
+		conn.Close()
+		return
+	}
 }
 
 func (c *Client) Close() {

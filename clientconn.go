@@ -289,15 +289,13 @@ func (p *connPool) Close() {
 }
 
 type clientConn struct {
-	conn     net.Conn
-	reader   *bufio.Reader
-	addr     string
-	lastUsed time.Time
-	status   int32 // connection status
-	mu       sync.Mutex
-
-	healthScore int32     // Health score (0-100)
-	createTime  time.Time // Creation time
+	conn       net.Conn
+	reader     *bufio.Reader
+	addr       string
+	lastUsed   time.Time
+	status     int32 // connection status
+	mu         sync.Mutex
+	createTime time.Time // Creation time
 }
 
 func newClientConn(c *Client, target string) (*clientConn, error) {
@@ -346,13 +344,12 @@ func newClientConn(c *Client, target string) (*clientConn, error) {
 
 	now := time.Now()
 	cc := &clientConn{
-		conn:        conn,
-		reader:      bufio.NewReaderSize(conn, ReaderBufferSize),
-		addr:        target,
-		lastUsed:    now,
-		status:      connStatusIdle,
-		healthScore: 100,
-		createTime:  now,
+		conn:       conn,
+		reader:     bufio.NewReaderSize(conn, ReaderBufferSize),
+		addr:       target,
+		lastUsed:   now,
+		status:     connStatusIdle,
+		createTime: now,
 	}
 
 	return cc, nil
@@ -398,10 +395,7 @@ func (cc *clientConn) isHealthy() bool {
 		return false
 	}
 
-	if atomic.LoadInt32(&cc.healthScore) < 50 {
-		return false
-	}
-
+	// if the connection has been idle for more than 5 minutes, perform a ping check
 	if time.Since(cc.lastUsed) > 5*time.Minute {
 		return cc.pingCheck()
 	}
@@ -409,62 +403,28 @@ func (cc *clientConn) isHealthy() bool {
 	return true
 }
 
-// pingCheck Health check via ping
+// pingCheck check the health of your connection by pinging it.
 func (cc *clientConn) pingCheck() bool {
+	// setting a short timeout for fast detection
 	err := cc.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	if err != nil {
 		return false
 	}
 
-	// Try to read in non-blocking mode
+	// try to read a byte, expect a timeout
 	one := make([]byte, 1)
-	conn := cc.conn
-
-	// Try to read, expect a timeout
-	_, err = conn.Read(one)
+	_, err = cc.conn.Read(one)
 	if err != nil {
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			// This is the expected timeout error, the connection is good
-			// Restore the original timeout
+			// This is an expected timeout error, indicating that the connection is good
 			cc.conn.SetReadDeadline(time.Time{}) // Clear the timeout setting
 			return true
 		}
-
 		// other errors indicate that the connection has been disconnected
-		cc.decreaseHealth(50)
 		return false
 	}
 
 	cc.conn.SetReadDeadline(time.Time{})
-
 	return true
-}
-
-// increaseHealth Increase Connected Health Score
-func (cc *clientConn) increaseHealth(delta int32) {
-	for {
-		current := atomic.LoadInt32(&cc.healthScore)
-		next := current + delta
-		if next > 100 {
-			next = 100
-		}
-		if atomic.CompareAndSwapInt32(&cc.healthScore, current, next) {
-			break
-		}
-	}
-}
-
-// decreaseHealth Decrease Connection Health Score
-func (cc *clientConn) decreaseHealth(delta int32) {
-	for {
-		current := atomic.LoadInt32(&cc.healthScore)
-		next := current - delta
-		if next < 0 {
-			next = 0
-		}
-		if atomic.CompareAndSwapInt32(&cc.healthScore, current, next) {
-			break
-		}
-	}
 }
