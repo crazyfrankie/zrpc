@@ -1,4 +1,19 @@
 /*
+root@Enthusiasm:/mnt/d/gocode/zrpc/benchmark/zrpc-benchmark/client# go run client.go --concurrency=100 --total=1000000
+{"level":"info","ts":1744465505.2197497,"caller":"client/client.go:114","msg":"Starting benchmark","concurrency":100,"requests_per_client":10000,"total_requests":1000000,"pool_size":1000,"conn_timeout":3,"req_timeout":5,"warmup":1000,"batch_size":50,"cpu_cores":16}
+{"level":"info","ts":1744465505.2201982,"caller":"client/client.go:146","msg":"Warming up..."}
+{"level":"info","ts":1744465505.3582692,"caller":"client/client.go:148","msg":"Warm-up complete"}
+{"level":"info","ts":1744465515.3188875,"caller":"client/client.go:259","msg":"took 9960 ms for 1000000 requests"}
+{"level":"info","ts":1744465515.488602,"caller":"client/client.go:280","msg":"sent     requests    : 1000000\n"}
+{"level":"info","ts":1744465515.4886723,"caller":"client/client.go:281","msg":"received requests    : 1000000\n"}
+{"level":"info","ts":1744465515.488678,"caller":"client/client.go:282","msg":"received requests_OK : 1000000\n"}
+{"level":"info","ts":1744465515.4886875,"caller":"client/client.go:283","msg":"error    requests    : 0\n"}
+{"level":"info","ts":1744465515.488693,"caller":"client/client.go:284","msg":"success  rate        : 100.00%\n"}
+{"level":"info","ts":1744465515.4886968,"caller":"client/client.go:285","msg":"throughput  (TPS)    : 100401\n"}
+{"level":"info","ts":1744465515.4887075,"caller":"client/client.go:286","msg":"mean: 19750420 ns, median: 15782422 ns, max: 457203523 ns, min: 24899 ns, p99: 406539214 ns\n"}
+{"level":"info","ts":1744465515.4887128,"caller":"client/client.go:287","msg":"mean: 19 ms, median: 15 ms, max: 457 ms, min: 0 ms, p99: 406 ms\n"}
+
+
 client: poolSize: 2000
 server: workerNum: runtime.NumCPU()*6
 {"level":"info","ts":1742802185.7984157,"caller":"client/client.go:98","msg":"Starting benchmark","concurrency":100,"requests_per_client":10000,"total_requests":1000000,"pool_size":2000,"conn_timeout":3,"req_timeout":5,"warmup":1000,"batch_size":50,"cpu_cores":16}
@@ -67,7 +82,7 @@ import (
 var (
 	concurrency  = flag.Int("concurrency", runtime.NumCPU()*10, "client concurrency")
 	total        = flag.Int("total", 0, "total requests for client")
-	poolSize     = flag.Int("pool_size", 500, "connection pool size")
+	poolSize     = flag.Int("pool_size", 1000, "connection pool size")
 	connTimeout  = flag.Duration("conn_timeout", 3*time.Second, "connection timeout")
 	reqTimeout   = flag.Duration("req_timeout", 5*time.Second, "request timeout")
 	retryCount   = flag.Int("retry", 2, "retry count for failed requests")
