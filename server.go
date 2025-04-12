@@ -54,10 +54,6 @@ type Server struct {
 	addr        string
 }
 
-func (w *worker) stop() {
-	close(w.quit)
-}
-
 // NewServer returns a new rpc server
 func NewServer(opts ...ServerOption) *Server {
 	opt := defaultServerOption
@@ -115,6 +111,11 @@ func (w *worker) start() {
 			}
 		}
 	}()
+}
+
+// stop stops a worker
+func (w *worker) stop() {
+	close(w.quit)
 }
 
 // A workPool is an abstraction of a set of workers that manages the creation, scheduling, and destruction of workers.
