@@ -51,36 +51,47 @@ var defaultServerOption = &serverOption{
 
 type ServerOption func(*serverOption)
 
+// WithReadTimeout sets the timeout for a read request.
 func WithReadTimeout(duration time.Duration) ServerOption {
 	return func(opt *serverOption) {
 		opt.readTimeout = duration
 	}
 }
 
+// WithWriteTimeout sets the timeout for writing responses
 func WithWriteTimeout(duration time.Duration) ServerOption {
 	return func(opt *serverOption) {
 		opt.writeTimeout = duration
 	}
 }
 
+// WithTLSConfig sets the TLS configuration for whether to make a secure connection when connecting;
+// if it is empty, a secure connection is not used
 func WithTLSConfig(tls *tls.Config) ServerOption {
 	return func(opt *serverOption) {
 		opt.tlsConfig = tls
 	}
 }
 
+// WithMaxReceiveMessageSize sets the maximum size of request messages the server can accept,
+// otherwise the default value is used.
 func WithMaxReceiveMessageSize(max int) ServerOption {
 	return func(opt *serverOption) {
 		opt.maxReceiveMessageSize = max
 	}
 }
 
+// WithMaxSendMessageSize sets the size of the maximum message body that the server can send,
+// otherwise it is the default value.
 func WithMaxSendMessageSize(max int) ServerOption {
 	return func(opt *serverOption) {
 		opt.maxSendMessageSize = max
 	}
 }
 
+// WithWorkerPool sets the size of the server-side worker pool.
+// Because it's a dynamic policy, the minimum value is one-quarter of the value passed in,
+// and the maximum value is twice the value passed in, initially.
 func WithWorkerPool(size int) ServerOption {
 	return func(opt *serverOption) {
 		opt.enableWorkerPool = true
@@ -92,32 +103,11 @@ func WithWorkerPool(size int) ServerOption {
 	}
 }
 
-func WithMinWorkerPoolSize(size int) ServerOption {
-	return func(opt *serverOption) {
-		if size > 0 {
-			opt.minWorkerPoolSize = size
-		}
-	}
-}
-
-func WithMaxWorkerPoolSize(size int) ServerOption {
-	return func(opt *serverOption) {
-		if size > 0 {
-			opt.maxWorkerPoolSize = size
-		}
-	}
-}
-
+// WithTaskQueueSize sets the size of the task pool.
 func WithTaskQueueSize(size int) ServerOption {
 	return func(opt *serverOption) {
 		if size > 0 {
 			opt.taskQueueSize = size
 		}
-	}
-}
-
-func WithDebug() ServerOption {
-	return func(opt *serverOption) {
-		opt.enableDebug = true
 	}
 }
