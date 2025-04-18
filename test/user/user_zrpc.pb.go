@@ -77,15 +77,22 @@ func RegisterUserServiceServer(s zrpc.ServiceRegistrar, srv UserServiceServer) {
 	s.RegisterService(&UserService_ServiceDesc, srv)
 }
 
-func _UserService_Register_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _UserService_Register_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, middleware zrpc.ServerMiddleware) (interface{}, error) {
 	in := new(RegisterRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	if middleware == nil {
+		return srv.(UserServiceServer).Register(ctx, in)
+	}
+	info := &zrpc.ServerInfo{
+		Server:     srv,
+		FullMethod: UserService_Register_FullMethodName,
+	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(UserServiceServer).Register(ctx, req.(*RegisterRequest))
 	}
-	return handler(ctx, in)
+	return middleware(ctx, in, info, handler)
 }
 
 // UserService_ServiceDesc is the zrpc.ServiceDesc for UserService service.

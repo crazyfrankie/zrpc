@@ -77,15 +77,22 @@ func RegisterFileServiceServer(s zrpc.ServiceRegistrar, srv FileServiceServer) {
 	s.RegisterService(&FileService_ServiceDesc, srv)
 }
 
-func _FileService_Upload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _FileService_Upload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, middleware zrpc.ServerMiddleware) (interface{}, error) {
 	in := new(UploadRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	if middleware == nil {
+		return srv.(FileServiceServer).Upload(ctx, in)
+	}
+	info := &zrpc.ServerInfo{
+		Server:     srv,
+		FullMethod: FileService_Upload_FullMethodName,
+	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(FileServiceServer).Upload(ctx, req.(*UploadRequest))
 	}
-	return handler(ctx, in)
+	return middleware(ctx, in, info, handler)
 }
 
 // FileService_ServiceDesc is the zrpc.ServiceDesc for FileService service.
@@ -100,5 +107,5 @@ var FileService_ServiceDesc = zrpc.ServiceDesc{
 			Handler:    _FileService_Upload_Handler,
 		},
 	},
-	Metadata: "test/file.proto",
+	Metadata: "file.proto",
 }
