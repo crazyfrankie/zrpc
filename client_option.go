@@ -28,6 +28,9 @@ const (
 )
 
 type clientOption struct {
+	clientMiddleware ClientMiddleware
+	chainMiddlewares []ClientMiddleware
+
 	tls *tls.Config
 	// connectTimeout sets timeout for dialing
 	connectTimeout time.Duration
@@ -74,6 +77,21 @@ func defaultClientOption() *clientOption {
 }
 
 type ClientOption func(*clientOption)
+
+// DialWithMiddleware receives the incoming middleware and adds it to chainMiddlewares as an interceptor,
+// which is called before Invoke.
+func DialWithMiddleware(mw ClientMiddleware) ClientOption {
+	return func(opt *clientOption) {
+		opt.chainMiddlewares = append(opt.chainMiddlewares, mw)
+	}
+}
+
+// DialWithChainMiddleware works like DialWithMiddleware in that it accepts multiple middleware at once.
+func DialWithChainMiddleware(mws []ClientMiddleware) ClientOption {
+	return func(opt *clientOption) {
+		opt.chainMiddlewares = append(opt.chainMiddlewares, mws...)
+	}
+}
 
 // DialWithTLSConfig establishes a TLS-based TCP connection
 func DialWithTLSConfig(tls *tls.Config) ClientOption {

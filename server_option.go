@@ -19,6 +19,8 @@ const (
 )
 
 type serverOption struct {
+	serverMiddleware      ServerMiddleware
+	chainMiddlewares      []ServerMiddleware
 	tlsConfig             *tls.Config
 	readTimeout           time.Duration
 	writeTimeout          time.Duration
@@ -50,6 +52,22 @@ var defaultServerOption = &serverOption{
 }
 
 type ServerOption func(*serverOption)
+
+// WithMiddleware receives incoming middleware, adds it to chainMiddlewares as an interceptor,
+// and calls it before the business logic does.
+func WithMiddleware(mw ServerMiddleware) ServerOption {
+	return func(opt *serverOption) {
+		opt.chainMiddlewares = append(opt.chainMiddlewares, mw)
+	}
+}
+
+// WithChainMiddleware works like WithMiddleware
+// in that it takes multiple middleware and adds them to chainMiddlewares at once.
+func WithChainMiddleware(mws []ServerMiddleware) ServerOption {
+	return func(opt *serverOption) {
+		opt.chainMiddlewares = append(opt.chainMiddlewares, mws...)
+	}
+}
 
 // WithReadTimeout sets the timeout for a read request.
 func WithReadTimeout(duration time.Duration) ServerOption {
