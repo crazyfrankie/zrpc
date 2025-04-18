@@ -8,7 +8,7 @@ package hello
 import (
 	context "context"
 	fmt "fmt"
-	"github.com/crazyfrankie/zrpc"
+	zrpc "github.com/crazyfrankie/zrpc"
 )
 
 const (
@@ -77,15 +77,22 @@ func RegisterHelloServiceServer(s zrpc.ServiceRegistrar, srv HelloServiceServer)
 	s.RegisterService(&HelloService_ServiceDesc, srv)
 }
 
-func _HelloService_HelloWorld_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _HelloService_HelloWorld_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, middleware zrpc.ServerMiddleware) (interface{}, error) {
 	in := new(HelloRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	if middleware == nil {
+		return srv.(HelloServiceServer).HelloWorld(ctx, in)
+	}
+	info := &zrpc.ServerInfo{
+		Server:     srv,
+		FullMethod: HelloService_HelloWorld_FullMethodName,
+	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(HelloServiceServer).HelloWorld(ctx, req.(*HelloRequest))
 	}
-	return handler(ctx, in)
+	return middleware(ctx, in, info, handler)
 }
 
 // HelloService_ServiceDesc is the zrpc.ServiceDesc for HelloService service.

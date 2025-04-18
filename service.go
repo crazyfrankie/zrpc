@@ -9,7 +9,7 @@ import (
 )
 
 // MethodHandler is a function type that processes a unary RPC method call.
-type MethodHandler func(srv any, ctx context.Context, dec func(any) error) (any, error)
+type MethodHandler func(srv any, ctx context.Context, dec func(any) error, middleware ServerMiddleware) (any, error)
 
 // MethodDesc represents an RPC service's method specification.
 type MethodDesc struct {
