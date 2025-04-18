@@ -315,6 +315,8 @@ func (c *Call) prepareMessage(ctx context.Context) (*protocol.Message, error) {
 			md = metadata.Join(md, userMd)
 		}
 		req.Metadata = md
+	} else {
+		ctx = metadata.AppendToOutgoingContext(ctx, "user-agent", "zrpc/1.0.0")
 	}
 
 	return req, nil
