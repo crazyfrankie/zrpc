@@ -26,7 +26,7 @@ type ServerInfo struct {
 
 // Handler defines the handler invoked by UnaryServerInterceptor to complete the normal
 // execution of a unary RPC.
-type Handler func(ctx context.Context, req any) (any, any)
+type Handler func(ctx context.Context, req any) (any, error)
 
 // ServerMiddleware provides a hook to intercept the execution of an RPC on the server,
 // info contains all the information of this RPC the middleware can operate on.

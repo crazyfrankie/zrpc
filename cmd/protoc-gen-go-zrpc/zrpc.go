@@ -269,14 +269,20 @@ func serverSignature(g *protogen.GeneratedFile, method *protogen.Method) any {
 func genServerMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.GeneratedFile, method *protogen.Method, hnameFuncNameFormatter func(string) string) string {
 	service := method.Parent
 	hname := fmt.Sprintf("_%s_%s_Handler", service.GoName, method.GoName)
+	fullMethodName := generator.formatFullMethodSymbol(service, method)
 
-	g.P("func ", hnameFuncNameFormatter(hname), "(srv interface{}, ctx ", contextPackage.Ident("Context"), ", dec func(interface{}) error) (interface{}, error) {")
+	g.P("func ", hnameFuncNameFormatter(hname), "(srv interface{}, ctx ", contextPackage.Ident("Context"), ", dec func(interface{}) error, middleware ", zrpcPackage.Ident("ServerMiddleware"), ") (interface{}, error) {")
 	g.P("in := new(", method.Input.GoIdent, ")")
 	g.P("if err := dec(in); err != nil { return nil, err }")
+	g.P("if middleware == nil { return srv.(", service.GoName, "Server).", method.GoName, "(ctx, in) }")
+	g.P("info := &", zrpcPackage.Ident("ServerInfo"), "{")
+	g.P("Server: srv,")
+	g.P("FullMethod: ", fullMethodName, ",")
+	g.P("}")
 	g.P("handler := func(ctx ", contextPackage.Ident("Context"), ", req interface{}) (interface{}, error) {")
 	g.P("return srv.(", service.GoName, "Server).", method.GoName, "(ctx, req.(*", method.Input.GoIdent, "))")
 	g.P("}")
-	g.P("return handler(ctx, in)")
+	g.P("return middleware(ctx, in, info, handler)")
 	g.P("}")
 	g.P()
 
