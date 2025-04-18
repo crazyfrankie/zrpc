@@ -123,7 +123,7 @@ func AppendToOutgoingContext(ctx context.Context, kv ...string) context.Context 
 	return context.WithValue(ctx, mdOutgoingKey{}, rawMD{md: md.md, added: added})
 }
 
-// FromOutgoingContext is called by the user
+// FromOutgoingContext is called by the zRPC
 // It returns the outgoing metadata in ctx if it exists.
 func FromOutgoingContext(ctx context.Context) (MD, bool) {
 	raw, ok := ctx.Value(mdOutgoingKey{}).(rawMD)
