@@ -68,6 +68,8 @@ func NewServer(opts ...ServerOption) *Server {
 	}
 	s.cv = sync.NewCond(&s.mu)
 
+	chainServerMiddlewares(s)
+
 	if opt.enableWorkerPool {
 		s.initWorkerPool()
 	}
@@ -575,6 +577,41 @@ func (s *Server) readRequest(r io.Reader) (*protocol.Message, error) {
 	return req, err
 }
 
+func chainServerMiddlewares(s *Server) {
+	// Prepend opt.srvMiddleware to the chaining middlewares if it exists, since srvMiddleware will
+	// be executed before any other chained middlewares.
+	middlewares := s.opt.chainMiddlewares
+	if s.opt.srvMiddleware != nil {
+		middlewares = append([]ServerMiddleware{s.opt.srvMiddleware}, s.opt.chainMiddlewares...)
+	}
+
+	var chainedMws ServerMiddleware
+	if len(middlewares) == 0 {
+		chainedMws = nil
+	} else if len(middlewares) == 1 {
+		chainedMws = middlewares[0]
+	} else {
+		chainedMws = chainMiddlewares(middlewares)
+	}
+
+	s.opt.srvMiddleware = chainedMws
+}
+
+func chainMiddlewares(mws []ServerMiddleware) ServerMiddleware {
+	return func(ctx context.Context, req any, info *ServerInfo, handler Handler) (resp any, err error) {
+		return mws[0](ctx, req, info, getChainHandler(mws, 0, info, handler))
+	}
+}
+
+func getChainHandler(mws []ServerMiddleware, pos int, info *ServerInfo, finalHandler Handler) Handler {
+	if pos == len(mws)-1 {
+		return finalHandler
+	}
+	return func(ctx context.Context, req any) (any, error) {
+		return mws[pos+1](ctx, req, info, getChainHandler(mws, pos+1, info, finalHandler))
+	}
+}
+
 // doProcessOneRequest is the encapsulated workpool's processing method.
 func (s *Server) doProcessOneRequest(ctx context.Context, req *protocol.Message, conn net.Conn) {
 	s.processOneRequest(ctx, req, conn)
@@ -631,7 +668,7 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 		}
 		ctx = context.WithValue(ctx, responseKey{}, res)
 
-		reply, err = md.Handler(srv.serviceImpl, ctx, df)
+		reply, err = md.Handler(srv.serviceImpl, ctx, df, s.opt.srvMiddleware)
 		if err != nil {
 			s.handleError(res, err)
 		}

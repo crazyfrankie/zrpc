@@ -19,7 +19,7 @@ const (
 )
 
 type serverOption struct {
-	serverMiddleware      ServerMiddleware
+	srvMiddleware         ServerMiddleware
 	chainMiddlewares      []ServerMiddleware
 	tlsConfig             *tls.Config
 	readTimeout           time.Duration
@@ -57,7 +57,10 @@ type ServerOption func(*serverOption)
 // and calls it before the business logic does.
 func WithMiddleware(mw ServerMiddleware) ServerOption {
 	return func(opt *serverOption) {
-		opt.chainMiddlewares = append(opt.chainMiddlewares, mw)
+		if opt.srvMiddleware != nil {
+			panic("The server middleware was already set and may not be reset.")
+		}
+		opt.srvMiddleware = mw
 	}
 }
 

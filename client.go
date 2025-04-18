@@ -79,6 +79,8 @@ func NewClient(target string, opts ...ClientOption) (*Client, error) {
 		return nil, err
 	}
 
+	chainClientMiddlewares(client)
+
 	// initiate heartbeat detection
 	if client.opt.heartbeatInterval > 0 {
 		client.startHeartbeat()
@@ -238,6 +240,37 @@ func (c *Client) sendHeartbeat() {
 		// heartbeat failed, close connection
 		conn.Close()
 		return
+	}
+}
+
+func chainClientMiddlewares(c *Client) {
+	// Prepend opt.srvMiddleware to the chaining middlewares if it exists, since srvMiddleware will
+	// be executed before any other chained middlewares.
+	middlewares := c.opt.chainMiddlewares
+	if c.opt.clientMiddleware != nil {
+		middlewares = append([]ClientMiddleware{c.opt.clientMiddleware}, c.opt.chainMiddlewares...)
+	}
+
+	var chainedMws ClientMiddleware
+	if len(middlewares) == 0 {
+		chainedMws = nil
+	} else if len(middlewares) == 1 {
+		chainedMws = middlewares[0]
+	} else {
+		chainedMws = func(ctx context.Context, method string, req, reply any, cc *Client, invoker Invoker) error {
+			return middlewares[0](ctx, method, req, reply, cc, getChainInvoker(middlewares, 0, invoker))
+		}
+	}
+
+	c.opt.clientMiddleware = chainedMws
+}
+
+func getChainInvoker(mws []ClientMiddleware, pos int, finalInvoker Invoker) Invoker {
+	if pos == len(mws)-1 {
+		return finalInvoker
+	}
+	return func(ctx context.Context, method string, req, reply any, cc *Client) error {
+		return mws[pos+1](ctx, method, req, reply, cc, getChainInvoker(mws, pos+1, finalInvoker))
 	}
 }
 

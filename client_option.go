@@ -82,7 +82,10 @@ type ClientOption func(*clientOption)
 // which is called before Invoke.
 func DialWithMiddleware(mw ClientMiddleware) ClientOption {
 	return func(opt *clientOption) {
-		opt.chainMiddlewares = append(opt.chainMiddlewares, mw)
+		if opt.clientMiddleware != nil {
+			panic("The client middleware was already set and may not be reset.")
+		}
+		opt.clientMiddleware = mw
 	}
 }
 

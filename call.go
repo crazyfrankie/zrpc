@@ -19,6 +19,15 @@ import (
 // Invoke sends the RPC request on the wire and returns after response is
 // received.  This is typically called by generated code.
 func (c *Client) Invoke(ctx context.Context, method string, args any, reply any) error {
+	// If the user adds middleware, execute the middleware first
+	if c.opt.clientMiddleware != nil {
+		return c.opt.clientMiddleware(ctx, method, args, reply, c, invoke)
+	}
+
+	return invoke(ctx, method, args, reply, c)
+}
+
+func invoke(ctx context.Context, method string, args any, reply any, c *Client) error {
 	if args == nil || reply == nil {
 		return ErrInvalidArgument
 	}
