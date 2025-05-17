@@ -35,6 +35,7 @@ type serverOption struct {
 	minWorkerPoolSize int
 	maxWorkerPoolSize int
 	taskQueueSize     int
+	adjustInterval    time.Duration // Interval for worker pool size adjustment
 	enableDebug       bool
 }
 
@@ -48,6 +49,7 @@ var defaultServerOption = &serverOption{
 	minWorkerPoolSize:     defaultMinWorkerPoolSize,
 	maxWorkerPoolSize:     defaultMaxWorkerPoolSize,
 	taskQueueSize:         defaultTaskQueueSize,
+	adjustInterval:        time.Second * 5, // Default to 5 seconds for worker pool adjustment
 	enableDebug:           false,
 }
 
@@ -129,6 +131,27 @@ func WithTaskQueueSize(size int) ServerOption {
 	return func(opt *serverOption) {
 		if size > 0 {
 			opt.taskQueueSize = size
+		}
+	}
+}
+
+// WithWorkerPoolAdjustInterval sets the interval for adjusting worker pool size.
+func WithWorkerPoolAdjustInterval(interval time.Duration) ServerOption {
+	return func(opt *serverOption) {
+		if interval > 0 {
+			opt.adjustInterval = interval
+		}
+	}
+}
+
+// WithWorkerPoolSize sets the min and max size of the server-side worker pool.
+func WithWorkerPoolSize(min, max int) ServerOption {
+	return func(opt *serverOption) {
+		opt.enableWorkerPool = true
+		if min > 0 && max >= min {
+			opt.minWorkerPoolSize = min
+			opt.maxWorkerPoolSize = max
+			opt.workerPoolSize = (min + max) / 2
 		}
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"runtime"
 	"sync"
@@ -25,22 +24,18 @@ import (
 )
 
 const (
-	ReadBufferSize       = 1024
-	workerResetThreshold = 1 << 16 // reset worker after 65536 requests to avoid stack growth
+	ReadBufferSize = 1024
+	// serverWorkerResetThreshold determines how many requests a worker goroutine
+	// processes before recycling itself to prevent unbounded stack growth.
+	// Using 2^16 (65536).
+	serverWorkerResetThreshold = 1 << 16
 )
-
-type task struct {
-	ctx    context.Context
-	req    *protocol.Message
-	conn   net.Conn
-	server *Server
-}
 
 // Server represents an RPC Server.
 type Server struct {
 	lis        net.Listener
+	mu         sync.RWMutex
 	opt        *serverOption
-	mu         sync.Mutex
 	conns      map[net.Conn]struct{}
 	serviceMap sync.Map       // service name -> service info
 	serveWG    sync.WaitGroup // counts active Serve goroutines for Stop/GracefulStop
@@ -51,8 +46,18 @@ type Server struct {
 	inShutdown     int32
 	done           chan struct{}
 
-	dynamicPool *workPool
-	addr        string
+	// Function-based worker pool
+	// Channel of functions to be executed instead of tasks
+	workerFuncChannel      chan func()
+	workerFuncChannelClose func()
+	numWorkers             int32
+
+	// Function to create a new worker - allows for testing via mocking
+	workerCreator func()
+
+	poolMetricsMu sync.RWMutex // Protect metrics updates
+	metrics       *PoolMetrics // Enhanced dynamic scaling metrics
+	workerLoads   []int32      // Record the load of each worker
 }
 
 // NewServer returns a new rpc server
@@ -63,79 +68,238 @@ func NewServer(opts ...ServerOption) *Server {
 	}
 
 	s := &Server{
-		opt:   opt,
-		conns: make(map[net.Conn]struct{}),
-		done:  make(chan struct{}),
+		opt:         opt,
+		conns:       make(map[net.Conn]struct{}),
+		done:        make(chan struct{}),
+		metrics:     &PoolMetrics{lastAdjustTime: time.Now()},
+		workerLoads: make([]int32, opt.maxWorkerPoolSize),
 	}
+
 	s.cv = sync.NewCond(&s.mu)
 
 	chainServerMiddlewares(s)
 
-	if opt.enableWorkerPool {
-		s.initWorkerPool()
+	// Set up the worker creator function
+	s.workerCreator = func() {
+		nextID := int(atomic.AddInt32(&s.numWorkers, 1) - 1)
+		go s.serverWorker(nextID)
+	}
+
+	// Override the worker pool initialization
+	if s.opt.enableWorkerPool {
+		s.initFunctionWorkerPool()
 	}
 
 	return s
 }
 
-// worker in zRPC is the upper abstraction of the goroutine,
-// a worker represents a reused concurrent process, the main reason for this is that when high concurrency,
-// each request opens a goroutine resulting in a large amount of goroutine creation and destruction,
-// affecting performance.
-type worker struct {
-	tasks  chan task
-	quit   chan struct{}
-	server *Server
-	id     int
-}
+// initFunctionWorkerPool initializes the function-based worker pool
+func (s *Server) initFunctionWorkerPool() {
+	numWorkers := s.opt.minWorkerPoolSize
+	s.numWorkers = int32(numWorkers)
+	// Use a buffered channel for the worker functions
+	// The buffer size should be large enough to handle bursts of requests
+	// but not so large that it consumes too much memory
+	s.workerFuncChannel = make(chan func(), s.opt.taskQueueSize)
+	s.workerFuncChannelClose = sync.OnceFunc(func() {
+		close(s.workerFuncChannel)
+	})
 
-// newWorker returns a new worker
-func newWorker(id int, server *Server) *worker {
-	return &worker{
-		tasks:  make(chan task),
-		quit:   make(chan struct{}),
-		server: server,
-		id:     id,
+	// Set the adjustment threshold above which emergency capacity expansion is triggered
+	s.metrics.queueUsage = 0
+	s.metrics.idleWorkers = 1.0
+
+	// Start the initial workers based on the minWorkerPoolSize
+	s.mu.Lock()
+	for i := 0; i < numWorkers; i++ {
+		s.workerCreator()
 	}
+	s.mu.Unlock()
+
+	// Start a monitoring goroutine to dynamically adjust the number of workers
+	go s.monitorWorkerPool()
 }
 
-// start starts a worker to begin working
-func (w *worker) start() {
-	go func() {
-		for {
-			select {
-			case t := <-w.tasks:
-				w.server.doProcessOneRequest(t.ctx, t.req, t.conn)
-				if pool := w.server.dynamicPool; pool != nil {
-					atomic.AddInt32(&pool.workerLoads[w.id], -1)
-				}
-			case <-w.quit:
-				return
-			}
+// serverWorker implements the gRPC-style worker that processes a certain number
+// of functions before recycling itself by spawning a new worker goroutine
+func (s *Server) serverWorker(workerID int) {
+	// Catch panics in worker goroutines
+	defer func() {
+		if r := recover(); r != nil {
+			zap.L().Error("Recovered from panic in serverWorker",
+				zap.Int("workerID", workerID),
+				zap.Any("panic", r))
+
+			// Spawn a replacement worker to maintain the pool size
+			go s.workerCreator()
 		}
 	}()
+
+	for completed := 0; completed < serverWorkerResetThreshold; completed++ {
+		// Use select with a default case to avoid blocking indefinitely
+		// if the server is shutting down
+		var f func()
+		var ok bool
+
+		select {
+		case f, ok = <-s.workerFuncChannel:
+			if !ok {
+				// Channel is closed, server is shutting down
+				return
+			}
+		default:
+			// No work available, sleep briefly to avoid CPU spinning
+			// and check again
+			time.Sleep(time.Millisecond)
+			continue
+		}
+
+		// Safely update worker load - check array bounds first
+		s.mu.RLock()
+		withinBounds := workerID >= 0 && workerID < len(s.workerLoads)
+		s.mu.RUnlock()
+
+		if withinBounds {
+			atomic.AddInt32(&s.workerLoads[workerID], 1)
+		}
+
+		// Execute function with panic protection
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					zap.L().Error("Recovered from panic in worker function",
+						zap.Int("workerID", workerID),
+						zap.Any("panic", r))
+				}
+			}()
+			f()
+		}()
+
+		// Safely decrease worker load
+		if withinBounds {
+			atomic.AddInt32(&s.workerLoads[workerID], -1)
+		}
+	}
+
+	// After processing serverWorkerResetThreshold requests,
+	// start a new worker and exit this one to reset the stack
+	s.workerCreator()
 }
 
-// stop stops a worker
-func (w *worker) stop() {
-	close(w.quit)
+// updatePoolMetrics updates the worker pool metrics for dynamic scaling
+func (s *Server) updatePoolMetrics() {
+	s.poolMetricsMu.Lock()
+	defer s.poolMetricsMu.Unlock()
+
+	// Update queue utilization
+	queueLen := len(s.workerFuncChannel)
+	queueCap := cap(s.workerFuncChannel)
+	s.metrics.queueUsage = float64(queueLen) / float64(queueCap)
+
+	// Update worker load metrics
+	totalLoad := int32(0)
+	activeWorkers := int32(0)
+
+	for i, load := range s.workerLoads {
+		if i < int(atomic.LoadInt32(&s.numWorkers)) {
+			totalLoad += atomic.LoadInt32(&load)
+			activeWorkers++
+		}
+	}
+
+	if activeWorkers > 0 {
+		s.metrics.idleWorkers = 1.0 - float64(totalLoad)/float64(activeWorkers)
+	} else {
+		s.metrics.idleWorkers = 1.0
+	}
+
+	// Update system resource utilization
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	s.metrics.cpuUsage = float64(m.Sys) / float64(runtime.NumCPU()*1024*1024)
+	s.metrics.memoryUsage = float64(m.Alloc) / float64(m.Sys)
+	s.metrics.lastAdjustTime = time.Now()
 }
 
-// A workPool is an abstraction of a set of workers that manages the creation, scheduling, and destruction of workers.
-type workPool struct {
-	minWorkers     int
-	maxWorkers     int
-	currentWorkers int32
-	taskQueue      chan task
-	workers        []*worker
-	metrics        *PoolMetrics
-	adjustInterval time.Duration
-	mu             sync.RWMutex
-	server         *Server
+// monitorWorkerPool periodically monitors the worker pool and adjusts
+// the number of workers based on the current load
+func (s *Server) monitorWorkerPool() {
+	// Use the configured adjustment interval
+	ticker := time.NewTicker(s.opt.adjustInterval)
+	defer ticker.Stop()
 
-	workerLoads     []int32
-	lastAdjustTime  time.Time
-	adjustThreshold float64
+	var currentLoad float64
+	var targetWorkers int32
+
+	for range ticker.C {
+		if s.isShutDown() {
+			return
+		}
+
+		// update metrics
+		s.updatePoolMetrics()
+
+		// Get current load metrics
+		s.poolMetricsMu.RLock()
+		currentLoad = s.metrics.queueUsage
+		idleWorkerRatio := s.metrics.idleWorkers
+		s.poolMetricsMu.RUnlock()
+
+		// Get the current number of workers
+		currentWorkers := atomic.LoadInt32(&s.numWorkers)
+		targetWorkers = currentWorkers
+
+		if currentLoad > 0.8 || idleWorkerRatio < 0.2 {
+			// Increase the number of worker threads under high load conditions
+			if currentWorkers < int32(s.opt.maxWorkerPoolSize) {
+				// Heavier loads, more worker threads
+				targetWorkers = int32(float64(currentWorkers) * 1.2)
+				if targetWorkers > int32(s.opt.maxWorkerPoolSize) {
+					targetWorkers = int32(s.opt.maxWorkerPoolSize)
+				}
+			}
+		} else if currentLoad < 0.2 && idleWorkerRatio > 0.8 {
+			// Reduce the number of worker threads under low load conditions
+			if currentWorkers > int32(s.opt.minWorkerPoolSize) {
+				targetWorkers = int32(float64(currentWorkers) * 0.8)
+				if targetWorkers < int32(s.opt.minWorkerPoolSize) {
+					targetWorkers = int32(s.opt.minWorkerPoolSize)
+				}
+			}
+		}
+
+		// If adjustment is needed
+		if targetWorkers != currentWorkers {
+			adjustment := targetWorkers - currentWorkers
+			if adjustment > 0 {
+				// Add workers
+				for i := int32(0); i < adjustment; i++ {
+					s.workerCreator()
+				}
+
+				// Set the actual number of workers
+				atomic.StoreInt32(&s.numWorkers, targetWorkers)
+
+				zap.L().Info("Increased worker pool size",
+					zap.Int32("from", currentWorkers),
+					zap.Int32("to", targetWorkers),
+					zap.Float64("queue_usage", currentLoad),
+					zap.Float64("idle_workers", idleWorkerRatio))
+			} else if adjustment < 0 {
+				// Instead of actively shutting down reduced workers,
+				// we let them exit naturally
+				// Only update the target count, so that
+				// new workers don't create replacement workers once the threshold is reached
+				atomic.StoreInt32(&s.numWorkers, targetWorkers)
+
+				zap.L().Info("Decreased worker pool size target",
+					zap.Int32("from", currentWorkers),
+					zap.Int32("to", targetWorkers),
+					zap.Float64("queue_usage", currentLoad),
+					zap.Float64("idle_workers", idleWorkerRatio))
+			}
+		}
+	}
 }
 
 // PoolMetrics represent the load metrics of the workers in a pool
@@ -151,258 +315,9 @@ type PoolMetrics struct {
 	lastAdjustTime time.Time
 }
 
-func newWorkPool(server *Server, minWorkers, maxWorkers int, queueSize int) *workPool {
-	pool := &workPool{
-		minWorkers:      minWorkers,
-		maxWorkers:      maxWorkers,
-		currentWorkers:  int32(minWorkers),
-		taskQueue:       make(chan task, queueSize),
-		workers:         make([]*worker, 0, maxWorkers),
-		metrics:         &PoolMetrics{lastAdjustTime: time.Now()},
-		adjustInterval:  time.Second * 5,
-		server:          server,
-		workerLoads:     make([]int32, maxWorkers),
-		adjustThreshold: 0.8, // Trigger adjustment at 80% load, also allows user decision making
-	}
-
-	// Initially start only the smallest worker thread to avoid wasting resources.
-	// Can be expanded through later asynchronous detection
-	for i := 0; i < minWorkers; i++ {
-		w := newWorker(i, server)
-		pool.workers = append(pool.workers, w)
-		w.start()
-	}
-
-	// Start the dynamic adjustment co-process
-	go pool.adjustWorkers()
-
-	// Start the Task Distribution Concatenation
-	go pool.dispatch()
-
-	return pool
-}
-
-// dispatch is responsible for distributing tasks
-// and dynamically determining the load on the worker to balance after load balancing
-// (since the Client has already done something similar by picking the Server
-// to send the request through a load balancing policy).
-func (p *workPool) dispatch() {
-	for t := range p.taskQueue {
-		workerIndex := p.selectWorker()
-		if workerIndex >= 0 {
-			p.mu.RLock()
-			if workerIndex < len(p.workers) {
-				w := p.workers[workerIndex]
-				select {
-				case w.tasks <- t:
-					atomic.AddInt32(&p.workerLoads[workerIndex], 1)
-					continue
-				default:
-					// The worker thread is busy, move on to the next one.
-				}
-			}
-			p.mu.RUnlock()
-		}
-
-		// If all workers are busy, use the fallback policy
-		p.handleOverload(t)
-	}
-}
-
-// selectWorker dynamically selects the optimal executing worker
-// from the load of the workers recorded in real time.
-func (p *workPool) selectWorker() int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if len(p.workers) == 0 {
-		return -1
-	}
-
-	// Find the least loaded worker thread
-	minLoad := int32(math.MaxInt32)
-	selectedIndex := -1
-
-	for i, load := range p.workerLoads {
-		if i >= len(p.workers) {
-			break
-		}
-		if load < minLoad {
-			minLoad = load
-			selectedIndex = i
-		}
-	}
-
-	return selectedIndex
-}
-
-// handleOverload handles the state where all workers are busy,
-// determines whether to expand the queue based on the current load,
-// and if the expansion is successful, uses the expanded worker to handle it,
-// otherwise it directly tries to start a new goroutine to execute the task.
-func (p *workPool) handleOverload(t task) {
-	if p.metrics.queueUsage > p.adjustThreshold {
-		p.quickScaleUp()
-	}
-
-	p.mu.RLock()
-	for i, w := range p.workers {
-		select {
-		case w.tasks <- t:
-			atomic.AddInt32(&p.workerLoads[i], 1)
-			p.mu.RUnlock()
-			return
-		default:
-			continue
-		}
-	}
-	p.mu.RUnlock()
-
-	// If still unassigned, deal with it directly
-	go p.server.doProcessOneRequest(t.ctx, t.req, t.conn)
-}
-
-// quickScaleUp is an emergency braking strategy
-// that protects the system's security mechanisms
-// by turning on a large number of workers at once
-// while staying within the maximum tolerable number of workers when unexpected high concurrency traffic hits.
-func (p *workPool) quickScaleUp() {
-	currentWorkers := int(atomic.LoadInt32(&p.currentWorkers))
-	if currentWorkers >= p.maxWorkers {
-		return
-	}
-
-	// Rapidly increase work threads by 20%
-	targetWorkers := int(float64(currentWorkers) * 1.2)
-	if targetWorkers > p.maxWorkers {
-		targetWorkers = p.maxWorkers
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for i := currentWorkers; i < targetWorkers; i++ {
-		w := newWorker(i, p.server)
-		p.workers = append(p.workers, w)
-		w.start()
-		atomic.AddInt32(&p.currentWorkers, 1)
-	}
-}
-
-// adjustWorkers asynchronous policy to dynamically monitor and update the status of each worker,
-// while fine-tuning the number of workers based on the current load.
-func (p *workPool) adjustWorkers() {
-	ticker := time.NewTicker(p.adjustInterval)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		p.updateMetrics()
-		p.adjustWorkerCount()
-	}
-}
-
-// updateMetrics Timed task to update worker load metrics for daily fine-tuning.
-func (p *workPool) updateMetrics() {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	// Update queue utilization
-	queueLen := len(p.taskQueue)
-	queueCap := cap(p.taskQueue)
-	p.metrics.queueUsage = float64(queueLen) / float64(queueCap)
-
-	// Update a worker thread load
-	totalLoad := int32(0)
-	for i := range p.workerLoads {
-		if i < len(p.workers) {
-			load := atomic.LoadInt32(&p.workerLoads[i])
-			totalLoad += load
-		}
-	}
-
-	if len(p.workers) > 0 {
-		p.metrics.idleWorkers = 1.0 - float64(totalLoad)/float64(len(p.workers))
-	}
-
-	// Update system resource utilization
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	p.metrics.cpuUsage = float64(m.Sys) / float64(runtime.NumCPU()*1024*1024)
-	p.metrics.memoryUsage = float64(m.Alloc) / float64(m.Sys)
-}
-
-// adjustWorkerCount is a daily adjustment strategy, unlike quickScaleUp,
-// which only fine-tunes the number of workers based on system runtime timer detection,
-// and is not able to cope with highly concurrent traffic, but is a simple strategy to save resources.
-func (p *workPool) adjustWorkerCount() {
-	currentWorkers := int(atomic.LoadInt32(&p.currentWorkers))
-	targetWorkers := currentWorkers
-
-	// Adjust the number of worker threads to the load
-	if p.metrics.queueUsage > p.adjustThreshold && p.metrics.idleWorkers < 0.2 {
-		// High load and few idle threads, increase worker threads
-		targetWorkers = int(float64(currentWorkers) * 1.2)
-	} else if p.metrics.queueUsage < 0.2 && p.metrics.idleWorkers > 0.8 {
-		// Low load and many idle threads, fewer worker threads
-		targetWorkers = int(float64(currentWorkers) * 0.8)
-	}
-
-	// Ensure that the minimum and maximum ranges
-	if targetWorkers < p.minWorkers {
-		targetWorkers = p.minWorkers
-	} else if targetWorkers > p.maxWorkers {
-		targetWorkers = p.maxWorkers
-	}
-
-	// If adjustments are needed
-	if targetWorkers != currentWorkers {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-
-		if targetWorkers > currentWorkers {
-			// Add worker threads
-			for i := currentWorkers; i < targetWorkers; i++ {
-				w := newWorker(i, p.server)
-				p.workers = append(p.workers, w)
-				w.start()
-				atomic.AddInt32(&p.currentWorkers, 1)
-			}
-		} else {
-			// Reduce work threads
-			for i := currentWorkers - 1; i >= targetWorkers; i-- {
-				if i < len(p.workers) {
-					p.workers[i].stop()
-					p.workers = p.workers[:i]
-					atomic.AddInt32(&p.currentWorkers, -1)
-				}
-			}
-		}
-	}
-}
-
-// stop shuts down the work pool
-func (p *workPool) stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for _, w := range p.workers {
-		w.stop()
-	}
-	close(p.taskQueue)
-}
-
-// initWorkerPool Initialize the work pool
-func (s *Server) initWorkerPool() {
-	if s.opt.enableWorkerPool {
-		s.dynamicPool = newWorkPool(s,
-			s.opt.minWorkerPoolSize,
-			s.opt.maxWorkerPoolSize,
-			s.opt.taskQueueSize)
-	}
-}
-
 // Serve starts and listens to RPC requests.
 // It is blocked until receiving connections from clients.
+// This overrides the original Server's Serve method.
 func (s *Server) Serve(network, address string) error {
 	lis, err := s.makeListener(network, address)
 	if err != nil {
@@ -412,9 +327,6 @@ func (s *Server) Serve(network, address string) error {
 	return s.serveListener(lis)
 }
 
-// serveListener accepts incoming connections on the Listener lis,
-// creating a new service goroutine for each.
-// The service goroutines read requests and then call services to reply to them.
 func (s *Server) serveListener(lis net.Listener) error {
 	var tempDelay time.Duration // how long to sleep on accept failure
 
@@ -465,7 +377,11 @@ func (s *Server) serveListener(lis net.Listener) error {
 
 // serveConn runs the server on a single connection.
 // serveConn blocks, serving the connection until the client hangs up.
+// This overrides the original Server's serveConn method.
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
+	// Most of the implementation remains the same as the original Server
+	// with some adjustments to use the function-based worker pool
+
 	ctx = share.SetConnection(ctx, conn)
 	if s.isShutDown() {
 		s.removeConn(conn)
@@ -481,7 +397,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 				ss = size
 			}
 			buf = buf[:ss]
-			zap.L().Error(fmt.Sprintf("serving %s panic error: %s, stack:\n %s", conn.RemoteAddr(), err, buf))
+			zap.L().Error(fmt.Sprintf("[serving %s panic error: %s, stack:\n %s", conn.RemoteAddr(), err, buf))
 		}
 
 		// make sure all inflight requests are handled and all drained
@@ -553,17 +469,101 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			continue
 		}
 
+		// Use the function-based worker pool if enabled
 		if s.opt.enableWorkerPool {
+			// Create a function to process the request
+			f := func() {
+				s.processOneRequest(ctx, req, conn)
+			}
+
+			// Try to send to worker pool, fall back to direct execution if pool is full
 			select {
-			case s.dynamicPool.taskQueue <- task{ctx: ctx, req: req, conn: conn, server: s}:
+			case s.workerFuncChannel <- f:
+				// Request sent to the worker pool
 			default:
-				// queue full, process directly
-				go s.processOneRequest(ctx, req, conn)
+				// Worker pool is full, check if we should scale up
+				s.poolMetricsMu.RLock()
+				queueUsage := s.metrics.queueUsage
+				s.poolMetricsMu.RUnlock()
+
+				// If the queue usage is high, trigger emergency scaling
+				if queueUsage > 0.8 {
+					s.quickScaleUp()
+				}
+
+				// Execute directly while scaling is in progress
+				go f()
 			}
 		} else {
 			go s.processOneRequest(ctx, req, conn)
 		}
 	}
+}
+
+// processOneRequest processes a single RPC request
+func (s *Server) doProcessOneRequest(ctx context.Context, req *protocol.Message, conn net.Conn) {
+	atomic.AddInt32(&s.handleMsgCount, 1)
+	s.processOneRequest(ctx, req, conn)
+}
+
+// quickScaleUp is an emergency scaling mechanism that rapidly increases
+// the number of workers in response to a sudden spike in traffic
+func (s *Server) quickScaleUp() {
+	// Use atomic operations for thread safety
+	currentWorkers := int(atomic.LoadInt32(&s.numWorkers))
+	if currentWorkers >= s.opt.maxWorkerPoolSize {
+		return
+	}
+
+	// Make sure we don't exceed the maximum pool size
+	maxAllowed := s.opt.maxWorkerPoolSize
+
+	// Calculate the target worker count with bounds checking
+	targetWorkers := int(float64(currentWorkers) * 1.2)
+	if targetWorkers > maxAllowed {
+		targetWorkers = maxAllowed
+	}
+
+	// Calculate how many workers to add
+	workersToAdd := targetWorkers - currentWorkers
+
+	if workersToAdd <= 0 {
+		return
+	}
+
+	// Use CAS (Compare-And-Swap) to ensure we don't create too many workers
+	if !atomic.CompareAndSwapInt32(&s.numWorkers, int32(currentWorkers), int32(targetWorkers)) {
+		// Someone else already adjusted the worker count, skip adjustment
+		return
+	}
+
+	// Add the workers with a limit on concurrent additions
+	batchSize := 10 // Add workers in batches to avoid overwhelming the system
+	for added := 0; added < workersToAdd; {
+		// Determine batch size for this iteration
+		currentBatch := batchSize
+		if workersToAdd-added < batchSize {
+			currentBatch = workersToAdd - added
+		}
+
+		s.mu.Lock()
+		for i := 0; i < currentBatch; i++ {
+			s.workerCreator()
+		}
+		s.mu.Unlock()
+
+		added += currentBatch
+
+		// Small delay between batches to avoid overwhelming the system
+		if added < workersToAdd {
+			time.Sleep(time.Millisecond * 50)
+		}
+	}
+
+	zap.L().Info("Emergency worker pool scaling completed",
+		zap.Int("from", currentWorkers),
+		zap.Int("to", targetWorkers),
+		zap.Float64("queue_usage", s.metrics.queueUsage))
 }
 
 func (s *Server) readRequest(r io.Reader) (*protocol.Message, error) {
@@ -611,11 +611,6 @@ func getChainHandler(mws []ServerMiddleware, pos int, info *ServerInfo, finalHan
 	return func(ctx context.Context, req any) (any, error) {
 		return mws[pos+1](ctx, req, info, getChainHandler(mws, pos+1, info, finalHandler))
 	}
-}
-
-// doProcessOneRequest is the encapsulated workpool's processing method.
-func (s *Server) doProcessOneRequest(ctx context.Context, req *protocol.Message, conn net.Conn) {
-	s.processOneRequest(ctx, req, conn)
 }
 
 // processOneRequest raw processing request method
@@ -741,38 +736,6 @@ func (s *Server) auth(ctx context.Context, req *protocol.Message) error {
 	return nil
 }
 
-func (s *Server) Stop() {
-	s.stop(false)
-}
-
-func (s *Server) GracefulStop() {
-	s.stop(true)
-}
-
-func (s *Server) stop(graceful bool) {
-	s.startShutdown()
-	s.mu.Lock()
-	s.lis.Close()
-	s.mu.Unlock()
-
-	if s.opt.enableWorkerPool {
-		s.dynamicPool.stop()
-	}
-
-	s.serveWG.Wait()
-
-	if graceful {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-
-		for len(s.conns) > 0 {
-			s.cv.Wait()
-		}
-	}
-
-	s.conns = nil
-}
-
 func (s *Server) isShutDown() bool {
 	return atomic.LoadInt32(&s.inShutdown) == 1
 }
@@ -783,13 +746,133 @@ func (s *Server) startShutdown() {
 	}
 }
 
-func (s *Server) removeConn(conn net.Conn) {
+// Stop stops the server abruptly
+func (s *Server) Stop() {
+	s.stop(false)
+}
+
+// GracefulStop stops the server gracefully
+func (s *Server) GracefulStop() {
+	s.stop(true)
+}
+
+// stop is a helper method used by Stop and GracefulStop
+func (s *Server) stop(graceful bool) {
+	// Start the shutdown process
+	s.startShutdown()
+
+	// Close the listener first to stop accepting new connections
 	s.mu.Lock()
-	delete(s.conns, conn)
-	s.cv.Broadcast()
+	if s.lis != nil {
+		s.lis.Close()
+	}
 	s.mu.Unlock()
 
-	conn.Close()
+	// Close the worker function channel if worker pool is enabled
+	if s.opt.enableWorkerPool {
+		// First drain the channel to avoid blocked workers
+		go func() {
+			// Set a timeout to ensure we don't block forever
+			timeout := time.After(5 * time.Second)
+			for {
+				select {
+				case <-timeout:
+					// Timeout reached, proceed with closing
+					s.workerFuncChannelClose()
+					return
+				default:
+					// Try to drain the channel
+					select {
+					case <-s.workerFuncChannel:
+						// Drained one item
+					default:
+						// Channel empty, close it
+						s.workerFuncChannelClose()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// Wait for all serving goroutines to finish with timeout
+	waitDone := make(chan struct{})
+	go func() {
+		s.serveWG.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		// Successfully waited for all goroutines
+	case <-time.After(30 * time.Second):
+		zap.L().Warn("Timed out waiting for all goroutines to finish")
+	}
+
+	// If graceful shutdown, wait for all connections to close
+	if graceful {
+		connCloseDone := make(chan struct{})
+		go func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for len(s.conns) > 0 {
+				s.cv.Wait()
+			}
+			close(connCloseDone)
+		}()
+
+		select {
+		case <-connCloseDone:
+			// Successfully closed all connections
+		case <-time.After(30 * time.Second):
+			zap.L().Warn("Timed out waiting for all connections to close")
+		}
+	}
+
+	s.mu.Lock()
+	s.conns = nil
+	s.mu.Unlock()
+}
+
+// removeConn removes a connection from the server's connection list
+// This overrides the original Server's removeConn method with a safer implementation
+func (s *Server) removeConn(conn net.Conn) {
+	// Use a channel to signal when we're done with the mutex to avoid deadlocks
+	done := make(chan struct{})
+
+	go func() {
+		// Try to acquire the lock with a timeout
+		lockAcquired := make(chan struct{})
+
+		go func() {
+			s.mu.Lock()
+			close(lockAcquired)
+		}()
+
+		select {
+		case <-lockAcquired:
+			// Successfully acquired the lock
+			delete(s.conns, conn)
+			s.cv.Broadcast()
+			s.mu.Unlock()
+		case <-time.After(5 * time.Second):
+			// Timeout - log the issue but proceed with closing the connection
+			zap.L().Warn("Timeout waiting for mutex in removeConn - possible deadlock averted")
+		}
+
+		// Always close the connection
+		conn.Close()
+		close(done)
+	}()
+
+	// Wait for connection removal to complete, but with a timeout
+	select {
+	case <-done:
+		// Successfully removed
+	case <-time.After(10 * time.Second):
+		// If we're still stuck after 10 seconds, just return to avoid blocking forever
+		zap.L().Error("Failed to remove connection after timeout - possible resource leak")
+	}
 }
 
 func (s *Server) getCodec() codec.Codec {
