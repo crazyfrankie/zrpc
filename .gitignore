@@ -5,3 +5,5 @@
 *.crt
 
 *.key
+
+docs/
