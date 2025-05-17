@@ -423,7 +423,8 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 
 	r := bufio.NewReaderSize(conn, ReadBufferSize)
 
-	// read requests and handle it
+	var writeMu sync.Mutex
+
 	for {
 		if s.isShutDown() {
 			return
@@ -447,11 +448,10 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		// inject metadata to context
-		ctx = metadata.NewInComingContext(ctx, req.Metadata)
+		reqCtx := metadata.NewInComingContext(ctx, req.Metadata)
 		closeConn := false
 		if !req.IsHeartBeat() {
-			err = s.auth(ctx, req)
+			err = s.auth(reqCtx, req)
 			closeConn = err != nil
 		}
 
@@ -459,7 +459,10 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			res := req.Clone()
 			res.SetMessageType(protocol.Response)
 			s.handleError(res, err)
+
+			writeMu.Lock()
 			s.sendResponse(conn, err, req, res, nil)
+			writeMu.Unlock()
 
 			// auth failed, closed the connection
 			if closeConn {
@@ -469,16 +472,61 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			continue
 		}
 
-		// Use the function-based worker pool if enabled
-		if s.opt.enableWorkerPool {
-			// Create a function to process the request
-			f := func() {
-				s.processOneRequest(ctx, req, conn)
+		currentReq := req
+		currentCtx := reqCtx
+
+		processFunc := func() {
+			var err error
+			var reply any
+
+			if currentReq.IsHeartBeat() {
+				res := currentReq.Clone()
+				res.SetMessageType(protocol.Response)
+				msgBuffer := res.Encode()
+
+				writeMu.Lock()
+				if s.opt.writeTimeout != 0 {
+					conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
+				}
+				conn.Write(msgBuffer.ReadOnlyData())
+				writeMu.Unlock()
+
+				msgBuffer.Free()
+				return
 			}
 
-			// Try to send to worker pool, fall back to direct execution if pool is full
+			svc, ok := s.serviceMap.Load(currentReq.ServiceName)
+			srv, _ := svc.(*service)
+			if !ok {
+				err = errors.New("zrpc: can't find service " + currentReq.ServiceName)
+			}
+
+			res := currentReq.Clone()
+			if md, ok := srv.methods[currentReq.ServiceMethod]; ok {
+				res.SetMessageType(protocol.Response)
+
+				df := func(v any) error {
+					if err := s.getCodec().Unmarshal(mem.BufferSlice{mem.SliceBuffer(currentReq.Payload)}, v); err != nil {
+						return fmt.Errorf("zrpc: error unmarshalling request: %v", err)
+					}
+					return nil
+				}
+
+				currentCtx = context.WithValue(currentCtx, responseKey{}, res)
+				reply, err = md.Handler(srv.serviceImpl, currentCtx, df, s.opt.srvMiddleware)
+				if err != nil {
+					s.handleError(res, err)
+				}
+			}
+
+			writeMu.Lock()
+			s.sendResponse(conn, err, currentReq, res, reply)
+			writeMu.Unlock()
+		}
+
+		if s.opt.enableWorkerPool {
 			select {
-			case s.workerFuncChannel <- f:
+			case s.workerFuncChannel <- processFunc:
 				// Request sent to the worker pool
 			default:
 				// Worker pool is full, check if we should scale up
@@ -491,11 +539,10 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 					s.quickScaleUp()
 				}
 
-				// Execute directly while scaling is in progress
-				go f()
+				go processFunc()
 			}
 		} else {
-			go s.processOneRequest(ctx, req, conn)
+			go processFunc()
 		}
 	}
 }
@@ -676,14 +723,17 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 	s.sendResponse(conn, err, req, res, reply)
 }
 
-func (s *Server) sendResponse(conn net.Conn, err error, req, res *protocol.Message, reply any) {
+func (s *Server) sendResponse(conn net.Conn, originalErr error, req, res *protocol.Message, reply any) {
 	var d mem.BufferSlice
-	var appErr error
 
 	if reply != nil {
-		d, appErr = s.getCodec().Marshal(reply)
-		if appErr != nil {
-			err = appErr
+		var marshalErr error
+		d, marshalErr = s.getCodec().Marshal(reply)
+		if marshalErr != nil {
+			if originalErr == nil {
+				originalErr = marshalErr
+				s.handleError(res, marshalErr)
+			}
 		}
 	}
 	defer d.Free()
@@ -696,17 +746,15 @@ func (s *Server) sendResponse(conn net.Conn, err error, req, res *protocol.Messa
 	}
 
 	msgBuffer := res.Encode()
-
-	go func() {
-		if s.opt.writeTimeout != 0 {
-			conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
-		}
-		_, writeErr := conn.Write(msgBuffer.ReadOnlyData())
-		msgBuffer.Free()
-		if writeErr != nil {
-			zap.L().Error("zrpc: failed to send response", zap.Error(writeErr))
-		}
-	}()
+	
+	if s.opt.writeTimeout != 0 {
+		conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
+	}
+	_, writeErr := conn.Write(msgBuffer.ReadOnlyData())
+	msgBuffer.Free()
+	if writeErr != nil {
+		zap.L().Error("zrpc: failed to send response", zap.Error(writeErr))
+	}
 }
 
 func (s *Server) handleError(res *protocol.Message, err error) {

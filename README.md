@@ -14,6 +14,7 @@
 - Middleware support
 - TLS security transport
 - Comprehensive metrics
+- Connection multiplexing (allowing a single TCP connection to handle multiple concurrent requests)
 
 ## Architecture Design
 
