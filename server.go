@@ -83,11 +83,10 @@ func NewServer(opts ...ServerOption) *Server {
 // each request opens a goroutine resulting in a large amount of goroutine creation and destruction,
 // affecting performance.
 type worker struct {
-	tasks     chan task
-	quit      chan struct{}
-	server    *Server
-	id        int
-	completed int32 // track number of completed requests
+	tasks  chan task
+	quit   chan struct{}
+	server *Server
+	id     int
 }
 
 // newWorker returns a new worker
@@ -109,16 +108,6 @@ func (w *worker) start() {
 				w.server.doProcessOneRequest(t.ctx, t.req, t.conn)
 				if pool := w.server.dynamicPool; pool != nil {
 					atomic.AddInt32(&pool.workerLoads[w.id], -1)
-					// Check if we need to recycle this worker
-					if atomic.AddInt32(&w.completed, 1) >= workerResetThreshold {
-						// Create a new worker to replace this one
-						pool.mu.Lock()
-						newWk := newWorker(w.id, w.server)
-						pool.workers[w.id] = newWk
-						newWk.start()
-						pool.mu.Unlock()
-						return // Exit current worker goroutine
-					}
 				}
 			case <-w.quit:
 				return
