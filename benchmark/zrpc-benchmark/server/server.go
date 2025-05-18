@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"github.com/crazyfrankie/zrpc/registry"
 	"net/http"
 	_ "net/http/pprof"
 	"runtime"
@@ -11,11 +10,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
 	"github.com/crazyfrankie/zrpc"
 	"github.com/crazyfrankie/zrpc/benchmark/bench"
+	"github.com/crazyfrankie/zrpc/registry"
 )
 
 var (
@@ -25,6 +28,7 @@ var (
 	workerNum  = flag.Int("worker_num", runtime.NumCPU()*6, "number of workers for request processing")
 	taskQueue  = flag.Int("task_queue", 100000, "task queue size for worker pool")
 	pprofPort  = flag.String("pprof", ":6060", "pprof http server address")
+	promPort   = flag.String("prom", ":9091", "prometheus metrics http server address")
 	logLevel   = flag.String("log", "info", "log level: debug, info, warn, error")
 	bufferSize = flag.Int("buffer", 64*1024, "response buffer size")
 )
@@ -38,6 +42,54 @@ var responsePool = sync.Pool{
 		}
 	},
 }
+
+// Prometheus 指标
+var (
+	requestCounter = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "zrpc_benchmark_requests_total",
+			Help: "Total number of RPC requests received",
+		},
+		[]string{"method", "status"},
+	)
+
+	requestDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "zrpc_benchmark_request_duration_seconds",
+			Help:    "Request duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method"},
+	)
+
+	concurrentRequests = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "zrpc_benchmark_concurrent_requests",
+			Help: "Number of concurrent requests being processed",
+		},
+	)
+
+	poolObjectsInUse = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "zrpc_benchmark_pool_objects_in_use",
+			Help: "Number of objects from the pool currently in use",
+		},
+	)
+
+	workerPoolSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "zrpc_benchmark_worker_pool_size",
+			Help: "Current size of the worker pool",
+		},
+	)
+
+	workerPoolQueueSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "zrpc_benchmark_worker_pool_queue_size",
+			Help: "Current size of the worker pool task queue",
+		},
+	)
+)
 
 func main() {
 	// 设置最大线程数
@@ -78,6 +130,17 @@ func main() {
 		}
 	}()
 
+	// 启动Prometheus指标服务器
+	go func() {
+		if *promPort != "" {
+			logger.Info("Starting Prometheus metrics server", zap.String("address", *promPort))
+			http.Handle("/metrics", promhttp.Handler())
+			if err := http.ListenAndServe(*promPort, nil); err != nil {
+				logger.Error("Failed to start Prometheus metrics server", zap.Error(err))
+			}
+		}
+	}()
+
 	logger.Info("Starting server",
 		zap.String("host", *host),
 		zap.Int("worker_pool_size", *workerNum),
@@ -113,6 +176,28 @@ func main() {
 	}
 
 	logger.Info("Server is ready to accept connections")
+
+	// 更新工作池指标
+	workerPoolSize.Set(float64(*workerNum))
+	workerPoolQueueSize.Set(float64(*taskQueue))
+
+	// 启动定期更新指标的 goroutine
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			// 这里可以添加其他需要定期更新的指标
+			numGoroutine := runtime.NumGoroutine()
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			logger.Debug("Runtime stats",
+				zap.Int("goroutines", numGoroutine),
+				zap.Uint64("heap_alloc_mb", m.HeapAlloc/1024/1024),
+				zap.Uint64("sys_mb", m.Sys/1024/1024))
+		}
+	}()
+
 	if err := srv.Serve("tcp", *host); err != nil {
 		logger.Fatal("Server failed", zap.Error(err))
 	}
@@ -124,6 +209,13 @@ type HelloService struct {
 }
 
 func (s *HelloService) Say(ctx context.Context, req *bench.BenchmarkMessage) (*bench.BenchmarkMessage, error) {
+	startTime := time.Now()
+	methodName := "Say"
+
+	// 增加并发请求计数
+	concurrentRequests.Inc()
+	defer concurrentRequests.Dec()
+
 	// 使用原子操作增加请求计数，每处理1000000个请求打印一条日志
 	count := atomic.AddInt64(&s.requestCount, 1)
 	if count%1000000 == 0 {
@@ -132,8 +224,14 @@ func (s *HelloService) Say(ctx context.Context, req *bench.BenchmarkMessage) (*b
 
 	// 确保请求对象不为空
 	if req == nil {
+		// 记录失败请求
+		requestCounter.WithLabelValues(methodName, "error").Inc()
 		return &bench.BenchmarkMessage{Field1: "ERROR", Field2: 0}, nil
 	}
+
+	// 增加对象池计数
+	poolObjectsInUse.Inc()
+	defer poolObjectsInUse.Dec()
 
 	// 从对象池获取响应对象而不是创建新对象
 	res := responsePool.Get().(*bench.BenchmarkMessage)
@@ -166,6 +264,11 @@ func (s *HelloService) Say(ctx context.Context, req *bench.BenchmarkMessage) (*b
 	} else {
 		runtime.Gosched()
 	}
+
+	// 记录请求持续时间
+	requestDuration.WithLabelValues(methodName).Observe(time.Since(startTime).Seconds())
+	// 记录成功请求
+	requestCounter.WithLabelValues(methodName, "success").Inc()
 
 	// 不再直接返回res，而是将其包装在defer函数中，确保在RPC调用完成后对象会被放回池中
 	respCopy := *res
