@@ -58,6 +58,10 @@ type Server struct {
 	poolMetricsMu sync.RWMutex // Protect metrics updates
 	metrics       *PoolMetrics // Enhanced dynamic scaling metrics
 	workerLoads   []int32      // Record the load of each worker
+
+	// Connection write synchronization
+	connMutexesMu sync.Mutex
+	connMutexes   map[net.Conn]*sync.Mutex
 }
 
 // NewServer returns a new rpc server
@@ -73,6 +77,7 @@ func NewServer(opts ...ServerOption) *Server {
 		done:        make(chan struct{}),
 		metrics:     &PoolMetrics{lastAdjustTime: time.Now()},
 		workerLoads: make([]int32, opt.maxWorkerPoolSize),
+		connMutexes: make(map[net.Conn]*sync.Mutex),
 	}
 
 	s.cv = sync.NewCond(&s.mu)
@@ -423,8 +428,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 
 	r := bufio.NewReaderSize(conn, ReadBufferSize)
 
-	var writeMu sync.Mutex
-
+	// read requests and handle it
 	for {
 		if s.isShutDown() {
 			return
@@ -448,109 +452,64 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		reqCtx := metadata.NewInComingContext(ctx, req.Metadata)
-		closeConn := false
-		if !req.IsHeartBeat() {
-			err = s.auth(reqCtx, req)
-			closeConn = err != nil
-		}
-
-		if err != nil {
-			res := req.Clone()
-			res.SetMessageType(protocol.Response)
-			s.handleError(res, err)
-
-			writeMu.Lock()
-			s.sendResponse(conn, err, req, res, nil)
-			writeMu.Unlock()
-
-			// auth failed, closed the connection
-			if closeConn {
-				zap.L().Info("auth failed for conn:", zap.String("addr", conn.RemoteAddr().String()), zap.Error(err))
-				return
-			}
-			continue
-		}
-
-		currentReq := req
-		currentCtx := reqCtx
-
-		processFunc := func() {
-			var err error
-			var reply any
-
-			if currentReq.IsHeartBeat() {
-				res := currentReq.Clone()
-				res.SetMessageType(protocol.Response)
-				msgBuffer := res.Encode()
-
-				writeMu.Lock()
-				if s.opt.writeTimeout != 0 {
-					conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
-				}
-				conn.Write(msgBuffer.ReadOnlyData())
-				writeMu.Unlock()
-
-				msgBuffer.Free()
-				return
-			}
-
-			svc, ok := s.serviceMap.Load(currentReq.ServiceName)
-			srv, _ := svc.(*service)
-			if !ok {
-				err = errors.New("zrpc: can't find service " + currentReq.ServiceName)
-			}
-
-			res := currentReq.Clone()
-			if md, ok := srv.methods[currentReq.ServiceMethod]; ok {
-				res.SetMessageType(protocol.Response)
-
-				df := func(v any) error {
-					if err := s.getCodec().Unmarshal(mem.BufferSlice{mem.SliceBuffer(currentReq.Payload)}, v); err != nil {
-						return fmt.Errorf("zrpc: error unmarshalling request: %v", err)
-					}
-					return nil
-				}
-
-				currentCtx = context.WithValue(currentCtx, responseKey{}, res)
-				reply, err = md.Handler(srv.serviceImpl, currentCtx, df, s.opt.srvMiddleware)
-				if err != nil {
-					s.handleError(res, err)
-				}
-			}
-
-			writeMu.Lock()
-			s.sendResponse(conn, err, currentReq, res, reply)
-			writeMu.Unlock()
-		}
-
-		if s.opt.enableWorkerPool {
-			select {
-			case s.workerFuncChannel <- processFunc:
-				// Request sent to the worker pool
-			default:
-				// Worker pool is full, check if we should scale up
-				s.poolMetricsMu.RLock()
-				queueUsage := s.metrics.queueUsage
-				s.poolMetricsMu.RUnlock()
-
-				// If the queue usage is high, trigger emergency scaling
-				if queueUsage > 0.8 {
-					s.quickScaleUp()
-				}
-
-				go processFunc()
-			}
-		} else {
-			go processFunc()
-		}
+		go func() {
+			s.serveRequest(ctx, req, conn)
+		}()
 	}
 }
 
-// processOneRequest processes a single RPC request
-func (s *Server) doProcessOneRequest(ctx context.Context, req *protocol.Message, conn net.Conn) {
-	atomic.AddInt32(&s.handleMsgCount, 1)
-	s.processOneRequest(ctx, req, conn)
+func (s *Server) serveRequest(ctx context.Context, req *protocol.Message, conn net.Conn) {
+	var err error
+	// inject metadata to context
+	ctx = metadata.NewInComingContext(ctx, req.Metadata)
+	closeConn := false
+	if !req.IsHeartBeat() {
+		err = s.auth(ctx, req)
+		closeConn = err != nil
+	}
+
+	if err != nil {
+		res := req.Clone()
+		res.SetMessageType(protocol.Response)
+		s.handleError(res, err)
+		s.sendResponse(conn, err, req, res, nil)
+
+		// auth failed, closed the connection
+		if closeConn {
+			zap.L().Info("auth failed for conn:", zap.String("addr", conn.RemoteAddr().String()), zap.Error(err))
+			return
+		}
+		return
+	}
+
+	// Use the function-based worker pool if enabled
+	if s.opt.enableWorkerPool {
+		// Create a function to process the request
+		f := func() {
+			s.processOneRequest(ctx, req, conn)
+		}
+
+		// Try to send to worker pool, fall back to direct execution if pool is full
+		select {
+		case s.workerFuncChannel <- f:
+			// Request sent to the worker pool
+		default:
+			// Worker pool is full, check if we should scale up
+			s.poolMetricsMu.RLock()
+			queueUsage := s.metrics.queueUsage
+			s.poolMetricsMu.RUnlock()
+
+			// If the queue usage is high, trigger emergency scaling
+			if queueUsage > 0.8 {
+				s.quickScaleUp()
+			}
+
+			// Execute directly while scaling is in progress
+			go f()
+		}
+	} else {
+		go s.processOneRequest(ctx, req, conn)
+	}
 }
 
 // quickScaleUp is an emergency scaling mechanism that rapidly increases
@@ -679,11 +638,17 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 		res.SetMessageType(protocol.Response)
 		msgBuffer := res.Encode()
 
+		// Get or create mutex for this connection and lock it
+		mu := s.getConnMutex(conn)
+		mu.Lock()
+		defer mu.Unlock()
+
 		if s.opt.writeTimeout != 0 {
 			conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
 		}
 		conn.Write(msgBuffer.ReadOnlyData())
 		msgBuffer.Free()
+		return
 	}
 
 	var err error
@@ -746,7 +711,12 @@ func (s *Server) sendResponse(conn net.Conn, originalErr error, req, res *protoc
 	}
 
 	msgBuffer := res.Encode()
-	
+
+	// Get or create mutex for this connection and lock it
+	mu := s.getConnMutex(conn)
+	mu.Lock()
+	defer mu.Unlock()
+
 	if s.opt.writeTimeout != 0 {
 		conn.SetWriteDeadline(time.Now().Add(s.opt.writeTimeout))
 	}
@@ -908,6 +878,11 @@ func (s *Server) removeConn(conn net.Conn) {
 			zap.L().Warn("Timeout waiting for mutex in removeConn - possible deadlock averted")
 		}
 
+		// Clean up the connection mutex
+		s.connMutexesMu.Lock()
+		delete(s.connMutexes, conn)
+		s.connMutexesMu.Unlock()
+
 		// Always close the connection
 		conn.Close()
 		close(done)
@@ -921,6 +896,20 @@ func (s *Server) removeConn(conn net.Conn) {
 		// If we're still stuck after 10 seconds, just return to avoid blocking forever
 		zap.L().Error("Failed to remove connection after timeout - possible resource leak")
 	}
+}
+
+// getConnMutex returns a mutex for a specific connection.
+// If a mutex doesn't exist for this connection, it creates one.
+func (s *Server) getConnMutex(conn net.Conn) *sync.Mutex {
+	s.connMutexesMu.Lock()
+	defer s.connMutexesMu.Unlock()
+
+	mu, ok := s.connMutexes[conn]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.connMutexes[conn] = mu
+	}
+	return mu
 }
 
 func (s *Server) getCodec() codec.Codec {
