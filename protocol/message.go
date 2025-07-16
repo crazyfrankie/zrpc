@@ -144,12 +144,12 @@ func (h *Header) GetCompressType() CompressType {
 
 // GetSeq returns sequence number of message
 func (h *Header) GetSeq() uint64 {
-	return binary.BigEndian.Uint64(h[3:])
+	return binary.LittleEndian.Uint64(h[3:])
 }
 
 // SetSeq sets sequence number
 func (h *Header) SetSeq(seq uint64) {
-	binary.BigEndian.PutUint64(h[3:], seq)
+	binary.LittleEndian.PutUint64(h[3:], seq)
 }
 
 // Clone clones from a message
@@ -217,34 +217,34 @@ func (m *Message) Encode() mem.Buffer {
 	copy((*buf)[offset:offset+11], m.Header[:])
 	offset += 11
 
-	binary.BigEndian.PutUint32((*buf)[offset:offset+4], uint32(dataL))
+	binary.LittleEndian.PutUint32((*buf)[offset:offset+4], uint32(dataL))
 	offset += 4
 
 	// write service name
-	binary.BigEndian.PutUint32((*buf)[offset:offset+4], uint32(sNL))
+	binary.LittleEndian.PutUint32((*buf)[offset:offset+4], uint32(sNL))
 	offset += 4
 	copy((*buf)[offset:offset+sNL], StringToSliceByte(m.ServiceName))
 	offset += sNL
 
 	// write method name
-	binary.BigEndian.PutUint32((*buf)[offset:offset+4], uint32(sMtdL))
+	binary.LittleEndian.PutUint32((*buf)[offset:offset+4], uint32(sMtdL))
 	offset += 4
 	copy((*buf)[offset:offset+sMtdL], StringToSliceByte(m.ServiceMethod))
 	offset += sMtdL
 
 	// write metadata
-	binary.BigEndian.PutUint32((*buf)[offset:offset+4], uint32(metaL))
+	binary.LittleEndian.PutUint32((*buf)[offset:offset+4], uint32(metaL))
 	offset += 4
 	if metaL > 0 {
 		for k, vs := range m.Metadata {
-			binary.BigEndian.PutUint32((*buf)[offset:offset+4], uint32(len(k)))
+			binary.LittleEndian.PutUint32((*buf)[offset:offset+4], uint32(len(k)))
 			offset += 4
 			copy((*buf)[offset:offset+len(k)], StringToSliceByte(k))
 			offset += len(k)
 			(*buf)[offset] = byte(len(vs))
 			offset++
 			for _, v := range vs {
-				binary.BigEndian.PutUint32((*buf)[offset:offset+4], uint32(len(v)))
+				binary.LittleEndian.PutUint32((*buf)[offset:offset+4], uint32(len(v)))
 				offset += 4
 				copy((*buf)[offset:offset+len(v)], StringToSliceByte(v))
 				offset += len(v)
@@ -253,7 +253,7 @@ func (m *Message) Encode() mem.Buffer {
 	}
 
 	// write payload
-	binary.BigEndian.PutUint32((*buf)[offset:offset+4], uint32(payloadL))
+	binary.LittleEndian.PutUint32((*buf)[offset:offset+4], uint32(payloadL))
 	offset += 4
 	if payloadL > 0 {
 		copy((*buf)[offset:offset+payloadL], payload)
@@ -288,7 +288,7 @@ func (m *Message) Decode(r io.Reader, maxLength int) error {
 	if _, err := io.ReadFull(r, lenData); err != nil {
 		return err
 	}
-	dataLen := binary.BigEndian.Uint32(lenData)
+	dataLen := binary.LittleEndian.Uint32(lenData)
 
 	// check if the data length exceeds the limit
 	if maxLength > 0 && maxLength < int(dataLen) {
@@ -327,7 +327,7 @@ func (m *Message) decodeMessageData(data []byte) error {
 	if offset+4 > dataLen {
 		return errors.New("invalid message format: insufficient data for service name length")
 	}
-	svcNameLen := binary.BigEndian.Uint32(data[offset : offset+4])
+	svcNameLen := binary.LittleEndian.Uint32(data[offset : offset+4])
 	offset += 4
 
 	if offset+int(svcNameLen) > dataLen {
@@ -340,7 +340,7 @@ func (m *Message) decodeMessageData(data []byte) error {
 	if offset+4 > dataLen {
 		return errors.New("invalid message format: insufficient data for service method length")
 	}
-	methodLen := binary.BigEndian.Uint32(data[offset : offset+4])
+	methodLen := binary.LittleEndian.Uint32(data[offset : offset+4])
 	offset += 4
 
 	if offset+int(methodLen) > dataLen {
@@ -353,7 +353,7 @@ func (m *Message) decodeMessageData(data []byte) error {
 	if offset+4 > dataLen {
 		return errors.New("invalid message format: insufficient data for metadata length")
 	}
-	metaLen := binary.BigEndian.Uint32(data[offset : offset+4])
+	metaLen := binary.LittleEndian.Uint32(data[offset : offset+4])
 	offset += 4
 
 	if m.Metadata == nil {
@@ -373,7 +373,7 @@ func (m *Message) decodeMessageData(data []byte) error {
 			if offset+4 > metaEnd {
 				return errors.New("invalid metadata format: insufficient data for key length")
 			}
-			keyLen := binary.BigEndian.Uint32(data[offset : offset+4])
+			keyLen := binary.LittleEndian.Uint32(data[offset : offset+4])
 			offset += 4
 
 			if offset+int(keyLen) > metaEnd {
@@ -392,7 +392,7 @@ func (m *Message) decodeMessageData(data []byte) error {
 				if offset+4 > metaEnd {
 					return errors.New("invalid metadata format: insufficient data for value length")
 				}
-				valueLen := binary.BigEndian.Uint32(data[offset : offset+4])
+				valueLen := binary.LittleEndian.Uint32(data[offset : offset+4])
 				offset += 4
 
 				if offset+int(valueLen) > metaEnd {
@@ -410,7 +410,7 @@ func (m *Message) decodeMessageData(data []byte) error {
 	if offset+4 > dataLen {
 		return errors.New("invalid message format: insufficient data for payload length")
 	}
-	payloadLen := binary.BigEndian.Uint32(data[offset : offset+4])
+	payloadLen := binary.LittleEndian.Uint32(data[offset : offset+4])
 	offset += 4
 
 	if offset+int(payloadLen) > dataLen {
