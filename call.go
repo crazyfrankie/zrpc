@@ -306,7 +306,7 @@ func (c *Call) prepareMessage(ctx context.Context) (*protocol.Message, error) {
 	}
 
 	// prepare metadata
-	if req.Metadata == nil {
+	if req.Metadata != nil {
 		md := metadata.New(map[string]string{
 			"user-agent": "zrpc/1.0.0",
 		})
@@ -316,16 +316,13 @@ func (c *Call) prepareMessage(ctx context.Context) (*protocol.Message, error) {
 		}
 		req.Metadata = md
 	} else {
-		ctx = metadata.AppendToOutgoingContext(ctx, "user-agent", "zrpc/1.0.0")
+		req.Metadata.Set(protocol.UserAgentHeader, "zrpc/1.0.0")
 	}
 
 	// Add timeout to metadata if context has deadline
 	if deadline, ok := ctx.Deadline(); ok {
 		timeout := time.Until(deadline)
 		if timeout > 0 {
-			if req.Metadata == nil {
-				req.Metadata = metadata.New(nil)
-			}
 			req.Metadata.Set(protocol.TimeoutHeader, protocol.EncodeTimeout(timeout))
 		}
 	}

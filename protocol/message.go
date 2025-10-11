@@ -13,6 +13,10 @@ import (
 	"github.com/crazyfrankie/zrpc/metadata"
 )
 
+const (
+	UserAgentHeader = "user-agent"
+)
+
 var Compressors = map[CompressType]Compressor{
 	None: &RawDataCompressor{},
 	Gzip: &GzipCompressor{},
