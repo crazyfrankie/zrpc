@@ -462,6 +462,18 @@ func (s *Server) serveRequest(ctx context.Context, req *protocol.Message, conn n
 	var err error
 	// inject metadata to context
 	ctx = metadata.NewInComingContext(ctx, req.Metadata)
+	
+	// Handle timeout from client
+	if req.Metadata != nil {
+		if timeoutStrs := req.Metadata.Get(protocol.TimeoutHeader); len(timeoutStrs) > 0 {
+			if timeout, err := protocol.DecodeTimeout(timeoutStrs[0]); err == nil && timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+		}
+	}
+	
 	closeConn := false
 	if !req.IsHeartBeat() {
 		err = s.auth(ctx, req)
