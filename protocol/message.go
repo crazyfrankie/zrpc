@@ -15,6 +15,7 @@ import (
 
 const (
 	UserAgentHeader = "user-agent"
+	UserAgent       = "zrpc/1.2.9"
 )
 
 var Compressors = map[CompressType]Compressor{

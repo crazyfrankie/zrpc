@@ -32,12 +32,6 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 		return ErrInvalidArgument
 	}
 
-	var cancel context.CancelFunc
-	if _, ok := ctx.Deadline(); !ok && c.opt.requestTimeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, c.opt.requestTimeout)
-		defer cancel()
-	}
-
 	// Start the retry loop
 	var lastErr error
 	for retry := 0; retry <= c.opt.maxRetries; retry++ {
@@ -306,9 +300,9 @@ func (c *Call) prepareMessage(ctx context.Context) (*protocol.Message, error) {
 	}
 
 	// prepare metadata
-	if req.Metadata != nil {
+	if req.Metadata == nil {
 		md := metadata.New(map[string]string{
-			"user-agent": "zrpc/1.0.0",
+			protocol.UserAgentHeader: protocol.UserAgent,
 		})
 		userMd, ok := metadata.FromOutgoingContext(ctx)
 		if ok {
@@ -316,7 +310,7 @@ func (c *Call) prepareMessage(ctx context.Context) (*protocol.Message, error) {
 		}
 		req.Metadata = md
 	} else {
-		req.Metadata.Set(protocol.UserAgentHeader, "zrpc/1.0.0")
+		req.Metadata.Set(protocol.UserAgentHeader, protocol.UserAgent)
 	}
 
 	// Add timeout to metadata if context has deadline

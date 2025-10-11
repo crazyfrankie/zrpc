@@ -50,7 +50,6 @@ type clientOption struct {
 	heartbeatInterval time.Duration
 	// heartbeatTimeout sets timeout for heartbeat request
 	heartbeatTimeout time.Duration
-	requestTimeout   time.Duration
 	maxRetries       int
 	retryBackoff     time.Duration // Retry backoff base time
 	maxRetryBackoff  time.Duration // Maximum retry backoff time
@@ -68,7 +67,6 @@ func defaultClientOption() *clientOption {
 		heartbeatInterval:     defaultHeartbeatInterval,
 		heartbeatTimeout:      defaultHeartbeatTimeout,
 		tcpKeepAlivePeriod:    defaultTCPKeepAlivePeriod,
-		requestTimeout:        defaultRequestTimeout,
 		maxRetries:            defaultMaxRetries,
 		retryBackoff:          defaultRetryBackoff,
 		maxRetryBackoff:       defaultMaxRetryBackoff,
@@ -142,13 +140,6 @@ func DialWithHeartbeatInterval(interval time.Duration) ClientOption {
 func DialWithHeartbeatTimeout(timeout time.Duration) ClientOption {
 	return func(opt *clientOption) {
 		opt.heartbeatTimeout = timeout
-	}
-}
-
-// DialWithRequestTimeout sets the timeout for RPC requests
-func DialWithRequestTimeout(timeout time.Duration) ClientOption {
-	return func(opt *clientOption) {
-		opt.requestTimeout = timeout
 	}
 }
 
