@@ -10,20 +10,26 @@ import (
 
 // TcpClient is a simple TCP client to communicate with the TcpRegistry server.
 type TcpClient struct {
-	registryAddr string
-	serviceName  string
-	serviceAddr  string
-	metadata     map[string]string
-	conn         net.Conn
-	mu           sync.Mutex
-	done         chan struct{}
+	registryAddr      string
+	serviceName       string
+	serviceAddr       string
+	metadata          map[string]string
+	conn              net.Conn
+	mu                sync.Mutex
+	done              chan struct{}
+	heartbeatInterval time.Duration
 }
 
 func NewTcpClient(registryAddr string) *TcpClient {
 	return &TcpClient{
-		registryAddr: registryAddr,
-		done:         make(chan struct{}),
+		registryAddr:      registryAddr,
+		done:              make(chan struct{}),
+		heartbeatInterval: 30 * time.Second, // 默认30秒
 	}
+}
+
+func (c *TcpClient) SetHeartbeatInterval(interval time.Duration) {
+	c.heartbeatInterval = interval
 }
 
 // connect connects to the registration center
@@ -104,10 +110,25 @@ func (c *TcpClient) Register(serviceName, serviceAddr string, metadata map[strin
 	c.serviceAddr = serviceAddr
 	c.metadata = metadata
 
+	if c.heartbeatInterval == 0 {
+		c.heartbeatInterval = 30 * time.Second
+	}
+
 	// Start heartbeat
 	go c.heartbeat()
 
 	return nil
+}
+
+func (c *TcpClient) RegisterWithKeepAlive(serviceName, serviceAddr string, metadata map[string]string, keepaliveSec int) error {
+	if keepaliveSec > 0 {
+		c.heartbeatInterval = time.Duration(keepaliveSec/3) * time.Second
+		if c.heartbeatInterval < 10*time.Second {
+			c.heartbeatInterval = 10 * time.Second
+		}
+	}
+
+	return c.Register(serviceName, serviceAddr, metadata)
 }
 
 // Unregister logout service
@@ -134,7 +155,7 @@ func (c *TcpClient) Unregister() error {
 
 // heartbeat sends a heartbeat
 func (c *TcpClient) heartbeat() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(c.heartbeatInterval)
 	defer ticker.Stop()
 
 	for {
@@ -150,9 +171,30 @@ func (c *TcpClient) heartbeat() {
 
 			_, err := c.sendRequest(cmd)
 			if err != nil {
-				fmt.Printf("send heart beat: %v\n", err)
+				fmt.Printf("心跳发送失败: %v，尝试重新注册\n", err)
+				c.reregister()
 			}
 		}
+	}
+}
+
+func (c *TcpClient) reregister() {
+	if c.serviceName == "" || c.serviceAddr == "" {
+		return
+	}
+
+	cmd := Request{
+		Action:      "register",
+		ServiceName: c.serviceName,
+		Addr:        c.serviceAddr,
+		Metadata:    c.metadata,
+	}
+
+	_, err := c.sendRequest(cmd)
+	if err != nil {
+		fmt.Printf("重新注册失败: %v\n", err)
+	} else {
+		fmt.Printf("服务重新注册成功: %s - %s\n", c.serviceName, c.serviceAddr)
 	}
 }
 

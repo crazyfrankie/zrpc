@@ -139,12 +139,13 @@ func main() {
 	)
 
 	// 添加客户端选项
+	// 注册中心keepalive为120秒，所以心跳间隔设为40秒（120/3）
 	clientOptions := []zrpc.ClientOption{
 		zrpc.DialWithMaxPoolSize(*poolSize),
 		zrpc.DialWithConnectTimeout(*connTimeout),
 		zrpc.DialWithTCPKeepAlive(15 * time.Second),
 		zrpc.DialWithIdleTimeout(30 * time.Second),
-		zrpc.DialWithHeartbeatInterval(30 * time.Second),
+		zrpc.DialWithHeartbeatInterval(40 * time.Second), // 与注册中心keepalive匹配
 		zrpc.DialWithHeartbeatTimeout(5 * time.Second),
 		zrpc.DialWithRegistryAddress("localhost:8084"),
 	}

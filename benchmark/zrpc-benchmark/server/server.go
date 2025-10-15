@@ -164,7 +164,8 @@ func main() {
 	bench.RegisterHelloServiceServer(srv, &HelloService{})
 
 	client := registry.NewTcpClient("localhost:8084")
-	err := client.Register("bench", *host, nil)
+	// 使用RegisterWithKeepAlive自动设置合适的心跳间隔
+	err := client.RegisterWithKeepAlive("bench", *host, nil, 120) // 120秒keepalive
 	if err != nil {
 		panic(err)
 	}

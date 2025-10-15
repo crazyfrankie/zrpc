@@ -93,6 +93,23 @@ func (r *Registry) Heartbeat(serviceName, addr string) error {
 	return nil
 }
 
+func (r *Registry) IsExpired(serviceName, addr string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	services, ok := r.servers[serviceName]
+	if !ok {
+		return true
+	}
+
+	service, ok := services[addr]
+	if !ok {
+		return true
+	}
+
+	return time.Since(service.LastPing) > r.timeout
+}
+
 func (r *Registry) GetService(serviceName string) ([]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

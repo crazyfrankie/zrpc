@@ -174,16 +174,17 @@ func (r *TcpRegistry) sendResponse(conn net.Conn, success bool, errMsg string, d
 // heartbeatChecker heartbeat detection
 func (r *TcpRegistry) heartbeatChecker(serviceName, addr string, conn net.Conn) {
 	connKey := fmt.Sprintf("%s:%s", serviceName, addr)
+	ticker := time.NewTicker(time.Duration(r.keepaliveSec/3) * time.Second) // 检查频率为超时时间的1/3
+	defer ticker.Stop()
 
 	for {
-		// 等待直到连接关闭或超时
 		select {
 		case <-r.done:
 			return
-		case <-time.After(time.Duration(r.keepaliveSec) * time.Second):
-			// 检查连接是否已关闭
-			if _, err := conn.Write([]byte{}); err != nil {
-				// 连接已关闭，注销服务
+		case <-ticker.C:
+			// 检查服务是否超时
+			if r.registry.IsExpired(serviceName, addr) {
+				// 服务超时，注销服务
 				r.registry.Unregister(serviceName, addr)
 				r.connMap.Delete(connKey)
 				fmt.Printf("服务 %s - %s 心跳超时，已注销\n", serviceName, addr)
