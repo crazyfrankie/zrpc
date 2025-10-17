@@ -365,7 +365,13 @@ func (s *Server) serveListener(lis net.Listener) error {
 				}
 				continue
 			}
+			return err
 		}
+		
+		if conn == nil {
+			continue
+		}
+		
 		tempDelay = 0
 
 		s.mu.Lock()
