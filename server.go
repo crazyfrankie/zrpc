@@ -369,8 +369,17 @@ func (s *Server) serveListener(lis net.Listener) error {
 		tempDelay = 0
 
 		s.mu.Lock()
-		s.conns[conn] = struct{}{}
+		// Check if server is shutting down before adding connection
+		if s.conns != nil {
+			s.conns[conn] = struct{}{}
+		}
 		s.mu.Unlock()
+		
+		// If server is shutting down, close the connection immediately
+		if s.conns == nil {
+			conn.Close()
+			continue
+		}
 
 		s.serveWG.Add(1)
 		go func() {

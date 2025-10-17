@@ -114,22 +114,6 @@ func (c *Client) parserTarget(target string) error {
 			// Create discovery based on registry
 			c.discovery = memory.NewRegistryDiscovery(c.opt.registryAddr, serviceName)
 
-			// Get initial servers from registry
-			servers, err := c.discovery.GetAll()
-			if err != nil {
-				return fmt.Errorf("failed to get servers from registry: %w", err)
-			}
-
-			if len(servers) == 0 {
-				return fmt.Errorf("no servers found in registry for service %s", serviceName)
-			}
-
-			// Initialize connection pools from registry
-			for _, server := range servers {
-				pool := newConnPool(c, server, c.opt.maxPoolSize)
-				c.pools[server] = pool
-			}
-
 		case len(target) >= 8 && target[:8] == "etcd:///":
 			// Etcd-based service discovery: etcd:///serviceName
 			serviceName := target[8:]
@@ -148,29 +132,9 @@ func (c *Client) parserTarget(target string) error {
 			}
 			c.discovery = d
 
-			// Get initial servers from etcd
-			servers, err := c.discovery.GetAll()
-			if err != nil {
-				return fmt.Errorf("failed to get servers from etcd: %w", err)
-			}
-
-			if len(servers) == 0 {
-				return fmt.Errorf("no servers found in etcd for service %s", serviceName)
-			}
-
-			// Initialize connection pools from etcd
-			for _, server := range servers {
-				pool := newConnPool(c, server, c.opt.maxPoolSize)
-				c.pools[server] = pool
-			}
-
 		default:
 			// Direct connection to specified address
 			c.discovery = memory.NewMultiServerRegistry([]string{target})
-
-			// Create connection pool for the target
-			pool := newConnPool(c, target, c.opt.maxPoolSize)
-			c.pools[target] = pool
 		}
 	} else {
 		return fmt.Errorf("target is required")
@@ -204,10 +168,18 @@ func (c *Client) sendHeartbeat() {
 		return
 	}
 
+	c.mu.RLock()
 	pool, ok := c.pools[target]
+	c.mu.RUnlock()
+
 	if !ok {
-		zap.L().Warn("connection pool not found for heartbeat", zap.String("target", target))
-		return
+		c.mu.Lock()
+		// Double-check pattern to avoid race condition
+		if pool, ok = c.pools[target]; !ok {
+			pool = newConnPool(c, target, c.opt.maxPoolSize)
+			c.pools[target] = pool
+		}
+		c.mu.Unlock()
 	}
 
 	conn, err := pool.get()
@@ -324,19 +296,15 @@ func (c *Client) UpdateServers(servers []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Create a map of existing servers
-	existingServers := make(map[string]struct{})
+	// Create a map of new servers
+	newServers := make(map[string]struct{})
 	for _, s := range servers {
-		existingServers[s] = struct{}{}
-		// Create pool for new server if it doesn't exist
-		if _, ok := c.pools[s]; !ok {
-			c.pools[s] = newConnPool(c, s, c.opt.maxPoolSize)
-		}
+		newServers[s] = struct{}{}
 	}
 
 	// Remove pools for servers that are no longer in the list
 	for addr, pool := range c.pools {
-		if _, ok := existingServers[addr]; !ok {
+		if _, ok := newServers[addr]; !ok {
 			pool.Close()
 			delete(c.pools, addr)
 		}

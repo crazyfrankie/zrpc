@@ -72,8 +72,11 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 
 		if !ok {
 			c.mu.Lock()
-			pool = newConnPool(c, target, c.opt.maxPoolSize)
-			c.pools[target] = pool
+			// Double-check pattern to avoid race condition
+			if pool, ok = c.pools[target]; !ok {
+				pool = newConnPool(c, target, c.opt.maxPoolSize)
+				c.pools[target] = pool
+			}
 			c.mu.Unlock()
 		}
 
