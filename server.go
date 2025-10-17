@@ -372,11 +372,10 @@ func (s *Server) serveListener(lis net.Listener) error {
 		// Check if server is shutting down before adding connection
 		if s.conns != nil {
 			s.conns[conn] = struct{}{}
-		}
-		s.mu.Unlock()
-		
-		// If server is shutting down, close the connection immediately
-		if s.conns == nil {
+			s.mu.Unlock()
+		} else {
+			// Server is shutting down, close the connection immediately
+			s.mu.Unlock()
 			conn.Close()
 			continue
 		}
