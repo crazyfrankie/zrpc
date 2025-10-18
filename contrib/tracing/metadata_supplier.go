@@ -2,27 +2,28 @@ package tracing
 
 import (
 	"context"
-	"strings"
 
 	"go.opentelemetry.io/otel/propagation"
+
+	"github.com/crazyfrankie/zrpc/metadata"
 )
 
 // MetadataSupplier is the supplier for the metadata from context.
 type MetadataSupplier struct {
-	metadata map[string][]string
+	metadata metadata.MD
 }
 
 // assert that MetadataSupplier implements the TextMapCarrier interface.
 var _ propagation.TextMapCarrier = &MetadataSupplier{}
 
 // NewMetadataSupplier creates a new MetadataSupplier.
-func NewMetadataSupplier(md map[string][]string) *MetadataSupplier {
+func NewMetadataSupplier(md metadata.MD) *MetadataSupplier {
 	return &MetadataSupplier{metadata: md}
 }
 
 // Get returns the value associated with the passed key.
 func (s *MetadataSupplier) Get(key string) string {
-	values := s.metadata[strings.ToLower(key)]
+	values := s.metadata.Get(key)
 	if len(values) == 0 {
 		return ""
 	}
@@ -31,7 +32,7 @@ func (s *MetadataSupplier) Get(key string) string {
 
 // Set stores the key-value pair.
 func (s *MetadataSupplier) Set(key string, value string) {
-	s.metadata[strings.ToLower(key)] = []string{value}
+	s.metadata.Set(key, value)
 }
 
 // Keys lists the keys stored in this carrier.
@@ -43,12 +44,23 @@ func (s *MetadataSupplier) Keys() []string {
 	return keys
 }
 
-// Inject injects the trace context into the metadata.
-func Inject(ctx context.Context, metadata map[string][]string, propagators propagation.TextMapPropagator) {
-	propagators.Inject(ctx, NewMetadataSupplier(metadata))
+// inject injects the trace context into outgoing metadata
+func inject(ctx context.Context, propagators propagation.TextMapPropagator) context.Context {
+	md, ok := metadata.FromOutgoingContext(ctx)
+	if !ok {
+		md = metadata.MD{}
+	}
+
+	propagators.Inject(ctx, NewMetadataSupplier(md))
+	return metadata.NewOutgoingContext(ctx, md)
 }
 
-// Extract extracts the trace context from the metadata.
-func Extract(ctx context.Context, metadata map[string][]string, propagators propagation.TextMapPropagator) context.Context {
-	return propagators.Extract(ctx, NewMetadataSupplier(metadata))
+// extract extracts the trace context from incoming metadata
+func extract(ctx context.Context, propagators propagation.TextMapPropagator) context.Context {
+	md, ok := metadata.FromInComingContext(ctx)
+	if !ok {
+		md = metadata.MD{}
+	}
+
+	return propagators.Extract(ctx, NewMetadataSupplier(md))
 }

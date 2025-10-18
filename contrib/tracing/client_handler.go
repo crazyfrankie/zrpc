@@ -105,11 +105,6 @@ func (h *clientHandler) TagRPC(ctx context.Context, info *stats.RPCTagInfo) cont
 			name,
 			opts...,
 		)
-
-		// Inject trace context into outgoing metadata
-		md := getOutgoingMetadata(ctx)
-		Inject(ctx, md, h.Propagators)
-		ctx = setOutgoingMetadata(ctx, md)
 	}
 
 	gctx := &zrpcContext{
@@ -117,7 +112,8 @@ func (h *clientHandler) TagRPC(ctx context.Context, info *stats.RPCTagInfo) cont
 		record:      record,
 	}
 
-	return context.WithValue(ctx, zrpcContextKey{}, gctx)
+	// Inject trace context into outgoing metadata
+	return inject(context.WithValue(ctx, zrpcContextKey{}, gctx), h.Propagators)
 }
 
 // HandleRPC processes the RPC stats.
@@ -190,15 +186,4 @@ func (h *clientHandler) handleRPC(ctx context.Context, rs stats.RPCStats) {
 		}
 		span.End()
 	}
-}
-
-// Helper functions for client metadata handling
-func getOutgoingMetadata(ctx context.Context) map[string][]string {
-	// Extract outgoing metadata from context - implementation depends on your framework
-	return make(map[string][]string)
-}
-
-func setOutgoingMetadata(ctx context.Context, md map[string][]string) context.Context {
-	// Set outgoing metadata to context - implementation depends on your framework
-	return ctx
 }

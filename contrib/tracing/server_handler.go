@@ -99,7 +99,8 @@ func NewServerHandler(opts ...Option) stats.Handler {
 
 // TagRPC can attach some information to the given context.
 func (h *serverHandler) TagRPC(ctx context.Context, info *stats.RPCTagInfo) context.Context {
-	ctx = Extract(ctx, getIncomingMetadata(ctx), h.Propagators)
+	// Extract trace context from incoming metadata
+	ctx = extract(ctx, h.Propagators)
 
 	name, attrs := parseFullMethod(info.FullMethodName)
 	attrs = append(attrs, semconv.RPCSystemKey.String("zrpc"))
@@ -217,19 +218,4 @@ func parseFullMethod(fullMethod string) (string, []attribute.KeyValue) {
 		}
 	}
 	return name, attrs
-}
-
-func extractMethod(ctx context.Context) string {
-	// Extract method from context - implementation depends on your framework
-	return "unknown"
-}
-
-func extractService(ctx context.Context) string {
-	// Extract service from context - implementation depends on your framework
-	return "unknown"
-}
-
-func getIncomingMetadata(ctx context.Context) map[string][]string {
-	// Extract metadata from context - implementation depends on your framework
-	return make(map[string][]string)
 }

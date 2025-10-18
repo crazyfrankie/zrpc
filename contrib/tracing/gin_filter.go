@@ -2,9 +2,9 @@ package tracing
 
 import (
 	"context"
-	"strings"
 
 	"go.opentelemetry.io/otel/trace"
+
 	"github.com/crazyfrankie/zrpc/stats"
 )
 
@@ -16,9 +16,8 @@ func GinClientFilter() Filter {
 		if !span.IsRecording() {
 			return true // No active span, allow tracing
 		}
-		
+
 		// Check if current span is from HTTP (Gin)
-		spanName := span.SpanContext().TraceID().String()
 		// If we're already in an HTTP span, skip client-side RPC tracing
 		// This assumes Gin spans have HTTP-related names
 		return false // Skip client tracing when in HTTP context
@@ -33,7 +32,7 @@ func HTTPAwareFilter() Filter {
 		if !span.IsRecording() {
 			return true
 		}
-		
+
 		// Check span attributes to see if it's from HTTP
 		// This is a heuristic - you might need to adjust based on your setup
 		return !isHTTPSpan(span)

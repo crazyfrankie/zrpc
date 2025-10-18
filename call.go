@@ -38,7 +38,7 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 	if !strings.HasPrefix(fullMethod, "/") {
 		fullMethod = "/" + fullMethod
 	}
-	
+
 	if len(c.opt.statsHandlers) > 0 {
 		for _, sh := range c.opt.statsHandlers {
 			ctx = sh.TagRPC(ctx, &stats.RPCTagInfo{
@@ -51,7 +51,7 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 	// Start the retry loop
 	var lastErr error
 	var beginTime time.Time
-	
+
 	for retry := 0; retry <= c.opt.maxRetries; retry++ {
 		if retry > 0 {
 			select {
@@ -431,18 +431,14 @@ func (c *Call) prepareMessage(ctx context.Context) (*protocol.Message, error) {
 	}
 
 	// prepare metadata
-	if req.Metadata == nil {
-		md := metadata.New(map[string]string{
-			protocol.UserAgentHeader: protocol.UserAgent,
-		})
-		userMd, ok := metadata.FromOutgoingContext(ctx)
-		if ok {
-			md = metadata.Join(md, userMd)
-		}
-		req.Metadata = md
-	} else {
-		req.Metadata.Set(protocol.UserAgentHeader, protocol.UserAgent)
+	md := metadata.New(map[string]string{
+		protocol.UserAgentHeader: protocol.UserAgent,
+	})
+	userMD, ok := metadata.FromOutgoingContext(ctx)
+	if ok {
+		md = metadata.Join(userMD, md)
 	}
+	req.Metadata = md
 
 	// Add timeout to metadata if context has deadline
 	if deadline, ok := ctx.Deadline(); ok {
