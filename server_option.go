@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/crazyfrankie/zrpc/protocol"
+	"github.com/crazyfrankie/zrpc/stats"
 )
 
 const (
@@ -37,6 +38,8 @@ type serverOption struct {
 	taskQueueSize     int
 	adjustInterval    time.Duration // Interval for worker pool size adjustment
 	enableDebug       bool
+
+	statsHandlers []stats.Handler // Stats handlers for monitoring and tracing
 }
 
 var defaultServerOption = &serverOption{
@@ -153,5 +156,12 @@ func WithWorkerPoolSize(min, max int) ServerOption {
 			opt.maxWorkerPoolSize = max
 			opt.workerPoolSize = (min + max) / 2
 		}
+	}
+}
+
+// WithStatsHandler adds a stats handler for RPC monitoring and tracing
+func WithStatsHandler(handler stats.Handler) ServerOption {
+	return func(opt *serverOption) {
+		opt.statsHandlers = append(opt.statsHandlers, handler)
 	}
 }
