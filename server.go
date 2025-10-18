@@ -403,6 +403,20 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	// with some adjustments to use the function-based worker pool
 
 	ctx = share.SetConnection(ctx, conn)
+	
+	// Stats Handler - Connection Begin
+	if len(s.opt.statsHandlers) > 0 {
+		for _, sh := range s.opt.statsHandlers {
+			ctx = sh.TagConn(ctx, &stats.ConnTagInfo{
+				RemoteAddr: conn.RemoteAddr(),
+				LocalAddr:  conn.LocalAddr(),
+			})
+			sh.HandleConn(ctx, &stats.ConnBegin{
+				Client: false,
+			})
+		}
+	}
+	
 	if s.isShutDown() {
 		s.removeConn(conn)
 		return
@@ -423,6 +437,15 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 		// make sure all inflight requests are handled and all drained
 		if s.isShutDown() {
 			<-s.done
+		}
+
+		// Stats Handler - Connection End
+		if len(s.opt.statsHandlers) > 0 {
+			for _, sh := range s.opt.statsHandlers {
+				sh.HandleConn(ctx, &stats.ConnEnd{
+					Client: false,
+				})
+			}
 		}
 
 		s.removeConn(conn)
@@ -478,13 +501,35 @@ func (s *Server) serveRequest(ctx context.Context, req *protocol.Message, conn n
 	// inject metadata to context
 	ctx = metadata.NewInComingContext(ctx, req.Metadata)
 	
-	// Stats Handler - TagRPC
+	// Stats Handler - TagRPC and InHeader
 	fullMethod := "/" + req.ServiceName + "/" + req.ServiceMethod
 	if len(s.opt.statsHandlers) > 0 {
 		for _, sh := range s.opt.statsHandlers {
 			ctx = sh.TagRPC(ctx, &stats.RPCTagInfo{
 				FullMethodName: fullMethod,
 				FailFast:       false,
+			})
+			
+			// Get compression type string
+			compressionType := ""
+			switch req.GetCompressType() {
+			case protocol.None:
+				compressionType = ""
+			case protocol.Gzip:
+				compressionType = "gzip"
+			default:
+				compressionType = "unknown"
+			}
+			
+			// InHeader event - first stats event on server side
+			sh.HandleRPC(ctx, &stats.InHeader{
+				Client:      false,
+				WireLength:  11, // Header is always 11 bytes
+				Header:      req.Metadata,
+				Compression: compressionType,
+				FullMethod:  fullMethod,
+				RemoteAddr:  conn.RemoteAddr(),
+				LocalAddr:   conn.LocalAddr(),
 			})
 		}
 	}
@@ -721,14 +766,29 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 
 			// Stats Handler - InPayload
 			if len(s.opt.statsHandlers) > 0 {
+				// Calculate actual uncompressed length
+				uncompressedLen := len(req.Payload)
+				compressedLen := uncompressedLen
+				
+				// If the message was compressed, req.Payload is already decompressed
+				// Calculate the actual compressed size using the compressor
+				if req.GetCompressType() != protocol.None {
+					if compressor, exists := protocol.Compressors[req.GetCompressType()]; exists {
+						if compressed, zipErr := compressor.Zip(req.Payload); zipErr == nil {
+							compressedLen = len(compressed)
+						}
+					}
+				}
+				
 				for _, sh := range s.opt.statsHandlers {
 					sh.HandleRPC(ctx, &stats.InPayload{
-						Client:     false,
-						Payload:    v,
-						Data:       req.Payload,
-						Length:     len(req.Payload),
-						WireLength: len(req.Payload),
-						RecvTime:   time.Now(),
+						Client:           false,
+						Payload:          v,
+						Data:             req.Payload,
+						Length:           uncompressedLen,
+						CompressedLength: compressedLen,
+						WireLength:       compressedLen + 11, // Header is 11 bytes
+						RecvTime:         time.Now(),
 					})
 				}
 			}
@@ -753,13 +813,26 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 		if marshalErr == nil {
 			payload := d.Materialize()
 			for _, sh := range s.opt.statsHandlers {
+				uncompressedLen := len(payload)
+				compressedLen := uncompressedLen
+				
+				// Check if response will be compressed using the actual compressor
+				if res.GetCompressType() != protocol.None && uncompressedLen >= protocol.CompressThreshold {
+					if compressor, exists := protocol.Compressors[res.GetCompressType()]; exists {
+						if compressed, zipErr := compressor.Zip(payload); zipErr == nil {
+							compressedLen = len(compressed)
+						}
+					}
+				}
+				
 				sh.HandleRPC(ctx, &stats.OutPayload{
-					Client:     false,
-					Payload:    reply,
-					Data:       payload,
-					Length:     len(payload),
-					WireLength: len(payload),
-					SentTime:   time.Now(),
+					Client:           false,
+					Payload:          reply,
+					Data:             payload,
+					Length:           uncompressedLen,
+					CompressedLength: compressedLen,
+					WireLength:       compressedLen + 11, // Header is 11 bytes
+					SentTime:         time.Now(),
 				})
 			}
 			d.Free()

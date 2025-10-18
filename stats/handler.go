@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"net"
 	"time"
 )
 
@@ -13,12 +14,25 @@ type Handler interface {
 	// The context used for the rest lifetime of the RPC will be derived from
 	// the returned context.
 	TagRPC(ctx context.Context, info *RPCTagInfo) context.Context
+	// HandleConn processes the Conn stats.
+	HandleConn(ctx context.Context, stats ConnStats)
+	// TagConn can attach some information to the given context.
+	// The returned context will be used for stats handling.
+	TagConn(ctx context.Context, info *ConnTagInfo) context.Context
 }
 
 // RPCStats contains stats information about RPCs.
 type RPCStats interface {
 	// IsClient returns true if this RPCStats is from client side.
 	IsClient() bool
+}
+
+// ConnTagInfo defines the relevant information needed by connection context tagger.
+type ConnTagInfo struct {
+	// RemoteAddr is the remote address of the corresponding connection.
+	RemoteAddr net.Addr
+	// LocalAddr is the local address of the corresponding connection.
+	LocalAddr net.Addr
 }
 
 // RPCTagInfo defines the relevant information needed by RPC context tagger.
@@ -30,8 +44,6 @@ type RPCTagInfo struct {
 }
 
 // Begin contains stats when an RPC attempt begins.
-// The following field is valid only on the server side:
-//   - BeginTime
 type Begin struct {
 	// Client is true if this Begin is from client side.
 	Client bool
@@ -39,6 +51,10 @@ type Begin struct {
 	BeginTime time.Time
 	// FailFast indicates if this RPC is failfast.
 	FailFast bool
+	// IsClientStream indicates whether the RPC is a client streaming RPC.
+	IsClientStream bool
+	// IsServerStream indicates whether the RPC is a server streaming RPC.
+	IsServerStream bool
 }
 
 // IsClient indicates if this is from client side.
@@ -54,6 +70,8 @@ type InPayload struct {
 	Data []byte
 	// Length is the length of uncompressed data.
 	Length int
+	// CompressedLength is the length of compressed data.
+	CompressedLength int
 	// WireLength is the length of data on wire (compressed, signed, encrypted).
 	WireLength int
 	// RecvTime is the time when the payload is received.
@@ -73,6 +91,12 @@ type InHeader struct {
 	Header map[string][]string
 	// Compression is the compression algorithm used for the RPC.
 	Compression string
+	// FullMethod is the full RPC method string, i.e., /package.service/method.
+	FullMethod string
+	// RemoteAddr is the remote address of the corresponding connection.
+	RemoteAddr net.Addr
+	// LocalAddr is the local address of the corresponding connection.
+	LocalAddr net.Addr
 }
 
 // IsClient indicates if this is from client side.
@@ -101,6 +125,8 @@ type OutPayload struct {
 	Data []byte
 	// Length is the length of uncompressed data.
 	Length int
+	// CompressedLength is the length of compressed data.
+	CompressedLength int
 	// WireLength is the length of data on wire (compressed, signed, encrypted).
 	WireLength int
 	// SentTime is the time when the payload is sent.
@@ -120,6 +146,12 @@ type OutHeader struct {
 	Compression string
 	// WireLength is the wire length of header.
 	WireLength int
+	// FullMethod is the full RPC method string, i.e., /package.service/method.
+	FullMethod string
+	// RemoteAddr is the remote address of the corresponding connection.
+	RemoteAddr net.Addr
+	// LocalAddr is the local address of the corresponding connection.
+	LocalAddr net.Addr
 }
 
 // IsClient indicates if this is from client side.

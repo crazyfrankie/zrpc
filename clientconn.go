@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/crazyfrankie/zrpc/stats"
 )
 
 const (
@@ -296,6 +298,7 @@ type clientConn struct {
 	status     int32 // connection status
 	mu         sync.Mutex
 	createTime time.Time // Creation time
+	client     *Client   // Reference to client for stats handlers
 }
 
 func newClientConn(c *Client, target string) (*clientConn, error) {
@@ -350,6 +353,21 @@ func newClientConn(c *Client, target string) (*clientConn, error) {
 		lastUsed:   now,
 		status:     connStatusIdle,
 		createTime: now,
+		client:     c,
+	}
+
+	// Stats Handler - Connection Begin
+	if len(c.opt.statsHandlers) > 0 {
+		ctx := context.Background()
+		for _, sh := range c.opt.statsHandlers {
+			ctx = sh.TagConn(ctx, &stats.ConnTagInfo{
+				RemoteAddr: conn.RemoteAddr(),
+				LocalAddr:  conn.LocalAddr(),
+			})
+			sh.HandleConn(ctx, &stats.ConnBegin{
+				Client: true,
+			})
+		}
 	}
 
 	return cc, nil
@@ -368,6 +386,16 @@ func (cc *clientConn) Close() error {
 
 	atomic.StoreInt32(&cc.status, connStatusClosed)
 	cc.mu.Unlock()
+
+	// Stats Handler - Connection End
+	if cc.client != nil && len(cc.client.opt.statsHandlers) > 0 {
+		ctx := context.Background()
+		for _, sh := range cc.client.opt.statsHandlers {
+			sh.HandleConn(ctx, &stats.ConnEnd{
+				Client: true,
+			})
+		}
+	}
 
 	return cc.conn.Close()
 }

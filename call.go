@@ -82,9 +82,11 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 		if len(c.opt.statsHandlers) > 0 {
 			for _, sh := range c.opt.statsHandlers {
 				sh.HandleRPC(ctx, &stats.Begin{
-					Client:    true,
-					BeginTime: beginTime,
-					FailFast:  false,
+					Client:         true,
+					BeginTime:      beginTime,
+					FailFast:       false,
+					IsClientStream: false, // ZRPC doesn't support streaming yet
+					IsServerStream: false, // ZRPC doesn't support streaming yet
 				})
 			}
 		}
@@ -190,20 +192,7 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 			continue
 		}
 
-		// Stats Handler - OutPayload (after successful send)
-		if len(c.opt.statsHandlers) > 0 {
-			req, _ := call.prepareMessage(ctx)
-			for _, sh := range c.opt.statsHandlers {
-				sh.HandleRPC(ctx, &stats.OutPayload{
-					Client:     true,
-					Payload:    args,
-					Data:       req.Payload,
-					Length:     len(req.Payload),
-					WireLength: len(req.Payload),
-					SentTime:   time.Now(),
-				})
-			}
-		}
+		// Stats Handler - OutPayload is now handled in sendMsg function
 
 		err = c.recvMsg(ctx, conn, reply)
 
@@ -226,22 +215,6 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 				}
 			}
 			continue
-		}
-
-		// Stats Handler - InPayload (after successful receive)
-		if len(c.opt.statsHandlers) > 0 {
-			// We need to estimate the payload size - in a real implementation
-			// you'd capture this during recvMsg
-			for _, sh := range c.opt.statsHandlers {
-				sh.HandleRPC(ctx, &stats.InPayload{
-					Client:     true,
-					Payload:    reply,
-					Data:       nil, // Would need to capture actual wire data
-					Length:     0,   // Would need actual length
-					WireLength: 0,   // Would need actual wire length
-					RecvTime:   time.Now(),
-				})
-			}
 		}
 
 		// Stats Handler - End (success)
@@ -292,6 +265,34 @@ func (c *Client) sendMsg(ctx context.Context, conn *clientConn, call *Call) erro
 	msgBuffer := req.Encode()
 	defer msgBuffer.Free()
 
+	// Stats Handler - OutHeader (before sending)
+	if len(c.opt.statsHandlers) > 0 {
+		// Get compression type string
+		compressionType := ""
+		switch req.GetCompressType() {
+		case protocol.None:
+			compressionType = ""
+		case protocol.Gzip:
+			compressionType = "gzip"
+		default:
+			compressionType = "unknown"
+		}
+
+		fullMethod := "/" + req.ServiceName + "/" + req.ServiceMethod
+
+		for _, sh := range c.opt.statsHandlers {
+			sh.HandleRPC(ctx, &stats.OutHeader{
+				Client:      true,
+				Header:      req.Metadata,
+				Compression: compressionType,
+				WireLength:  11, // Header is always 11 bytes
+				FullMethod:  fullMethod,
+				RemoteAddr:  conn.conn.RemoteAddr(),
+				LocalAddr:   conn.conn.LocalAddr(),
+			})
+		}
+	}
+
 	if conn.conn != nil {
 		deadline, ok := ctx.Deadline()
 		if ok {
@@ -300,6 +301,50 @@ func (c *Client) sendMsg(ctx context.Context, conn *clientConn, call *Call) erro
 	}
 
 	_, err = conn.conn.Write(msgBuffer.ReadOnlyData())
+
+	// Stats Handler - OutPayload (with actual message data)
+	if err == nil && len(c.opt.statsHandlers) > 0 {
+		// Calculate actual lengths
+		wireData := msgBuffer.ReadOnlyData()
+		wireLength := len(wireData)
+		payloadLength := len(req.Payload)
+		compressedLength := payloadLength
+
+		// If message was compressed, calculate the actual compressed size
+		if req.GetCompressType() != protocol.None {
+			// Calculate metadata size using the same logic as in Message.Encode()
+			metaSize := 0
+			if len(req.Metadata) > 0 {
+				for k, vs := range req.Metadata {
+					metaSize += 4 + len(k) + 1
+					for _, v := range vs {
+						metaSize += 4 + len(v)
+					}
+				}
+			}
+			
+			// Calculate service name and method size
+			serviceNameSize := 4 + len(req.ServiceName)
+			serviceMethodSize := 4 + len(req.ServiceMethod)
+			
+			// Wire data structure: header(11) + dataLen(4) + serviceName + serviceMethod + metadata + payload
+			// So compressed payload size = wireLength - header - dataLen - serviceName - serviceMethod - metadata
+			compressedLength = wireLength - 11 - 4 - serviceNameSize - serviceMethodSize - (4 + metaSize) - 4
+		}
+
+		for _, sh := range c.opt.statsHandlers {
+			sh.HandleRPC(ctx, &stats.OutPayload{
+				Client:           true,
+				Payload:          call.req,
+				Data:             req.Payload,
+				Length:           payloadLength,
+				CompressedLength: compressedLength,
+				WireLength:       wireLength,
+				SentTime:         time.Now(),
+			})
+		}
+	}
+
 	if err != nil {
 		var e *net.OpError
 		if errors.As(err, &e) {
@@ -370,6 +415,35 @@ func (c *Client) recvMsg(ctx context.Context, conn *clientConn, reply any) error
 
 	// Unmarshal response payload
 	err = codec.DefaultCodec.Unmarshal(mem.BufferSlice{mem.SliceBuffer(res.Payload)}, reply)
+
+	// Stats Handler - InPayload (with actual message data)
+	if err == nil && len(c.opt.statsHandlers) > 0 {
+		// Calculate actual lengths
+		uncompressedLen := len(res.Payload)
+		compressedLen := uncompressedLen
+
+		// If message was compressed, res.Payload is already decompressed
+		// Calculate the actual compressed size using the compressor
+		if res.GetCompressType() != protocol.None {
+			if compressor, exists := protocol.Compressors[res.GetCompressType()]; exists {
+				if compressed, zipErr := compressor.Zip(res.Payload); zipErr == nil {
+					compressedLen = len(compressed)
+				}
+			}
+		}
+
+		for _, sh := range c.opt.statsHandlers {
+			sh.HandleRPC(ctx, &stats.InPayload{
+				Client:           true,
+				Payload:          reply,
+				Data:             res.Payload,
+				Length:           uncompressedLen,
+				CompressedLength: compressedLen,
+				WireLength:       compressedLen + 11, // Header is 11 bytes
+				RecvTime:         time.Now(),
+			})
+		}
+	}
 
 	return err
 }
