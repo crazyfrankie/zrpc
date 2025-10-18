@@ -14,6 +14,7 @@ import (
 	"github.com/crazyfrankie/zrpc/mem"
 	"github.com/crazyfrankie/zrpc/metadata"
 	"github.com/crazyfrankie/zrpc/protocol"
+	"github.com/crazyfrankie/zrpc/stats"
 )
 
 // Invoke sends the RPC request on the wire and returns after response is
@@ -32,8 +33,25 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 		return ErrInvalidArgument
 	}
 
+	// Stats Handler - TagRPC
+	fullMethod := method
+	if !strings.HasPrefix(fullMethod, "/") {
+		fullMethod = "/" + fullMethod
+	}
+	
+	if len(c.opt.statsHandlers) > 0 {
+		for _, sh := range c.opt.statsHandlers {
+			ctx = sh.TagRPC(ctx, &stats.RPCTagInfo{
+				FullMethodName: fullMethod,
+				FailFast:       false,
+			})
+		}
+	}
+
 	// Start the retry loop
 	var lastErr error
+	var beginTime time.Time
+	
 	for retry := 0; retry <= c.opt.maxRetries; retry++ {
 		if retry > 0 {
 			select {
@@ -59,10 +77,33 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 			}
 		}
 
+		// Stats Handler - Begin (for each retry attempt)
+		beginTime = time.Now()
+		if len(c.opt.statsHandlers) > 0 {
+			for _, sh := range c.opt.statsHandlers {
+				sh.HandleRPC(ctx, &stats.Begin{
+					Client:    true,
+					BeginTime: beginTime,
+					FailFast:  false,
+				})
+			}
+		}
+
 		// Get a server using round-robin or user provider selection
 		target, err := c.discovery.Get(c.opt.balancerMode)
 		if err != nil {
 			lastErr = err
+			// Stats Handler - End (on error)
+			if len(c.opt.statsHandlers) > 0 {
+				for _, sh := range c.opt.statsHandlers {
+					sh.HandleRPC(ctx, &stats.End{
+						Client:    true,
+						BeginTime: beginTime,
+						EndTime:   time.Now(),
+						Error:     err,
+					})
+				}
+			}
 			continue
 		}
 
@@ -96,12 +137,34 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 
 		call, err := newCall(method, args)
 		if err != nil {
+			// Stats Handler - End (on error)
+			if len(c.opt.statsHandlers) > 0 {
+				for _, sh := range c.opt.statsHandlers {
+					sh.HandleRPC(ctx, &stats.End{
+						Client:    true,
+						BeginTime: beginTime,
+						EndTime:   time.Now(),
+						Error:     err,
+					})
+				}
+			}
 			return err
 		}
 
 		c.mu.Lock()
 		if c.closing || c.shutdown {
 			c.mu.Unlock()
+			// Stats Handler - End (on error)
+			if len(c.opt.statsHandlers) > 0 {
+				for _, sh := range c.opt.statsHandlers {
+					sh.HandleRPC(ctx, &stats.End{
+						Client:    true,
+						BeginTime: beginTime,
+						EndTime:   time.Now(),
+						Error:     ErrClientConnClosing,
+					})
+				}
+			}
 			return ErrClientConnClosing
 		}
 		c.mu.Unlock()
@@ -113,7 +176,33 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 			connReleased = true
 			conn.Close()
 			lastErr = err
+			// Stats Handler - End (on error)
+			if len(c.opt.statsHandlers) > 0 {
+				for _, sh := range c.opt.statsHandlers {
+					sh.HandleRPC(ctx, &stats.End{
+						Client:    true,
+						BeginTime: beginTime,
+						EndTime:   time.Now(),
+						Error:     err,
+					})
+				}
+			}
 			continue
+		}
+
+		// Stats Handler - OutPayload (after successful send)
+		if len(c.opt.statsHandlers) > 0 {
+			req, _ := call.prepareMessage(ctx)
+			for _, sh := range c.opt.statsHandlers {
+				sh.HandleRPC(ctx, &stats.OutPayload{
+					Client:     true,
+					Payload:    args,
+					Data:       req.Payload,
+					Length:     len(req.Payload),
+					WireLength: len(req.Payload),
+					SentTime:   time.Now(),
+				})
+			}
 		}
 
 		err = c.recvMsg(ctx, conn, reply)
@@ -125,7 +214,46 @@ func invoke(ctx context.Context, method string, args any, reply any, c *Client) 
 
 		if err != nil {
 			lastErr = err
+			// Stats Handler - End (on error)
+			if len(c.opt.statsHandlers) > 0 {
+				for _, sh := range c.opt.statsHandlers {
+					sh.HandleRPC(ctx, &stats.End{
+						Client:    true,
+						BeginTime: beginTime,
+						EndTime:   time.Now(),
+						Error:     err,
+					})
+				}
+			}
 			continue
+		}
+
+		// Stats Handler - InPayload (after successful receive)
+		if len(c.opt.statsHandlers) > 0 {
+			// We need to estimate the payload size - in a real implementation
+			// you'd capture this during recvMsg
+			for _, sh := range c.opt.statsHandlers {
+				sh.HandleRPC(ctx, &stats.InPayload{
+					Client:     true,
+					Payload:    reply,
+					Data:       nil, // Would need to capture actual wire data
+					Length:     0,   // Would need actual length
+					WireLength: 0,   // Would need actual wire length
+					RecvTime:   time.Now(),
+				})
+			}
+		}
+
+		// Stats Handler - End (success)
+		if len(c.opt.statsHandlers) > 0 {
+			for _, sh := range c.opt.statsHandlers {
+				sh.HandleRPC(ctx, &stats.End{
+					Client:    true,
+					BeginTime: beginTime,
+					EndTime:   time.Now(),
+					Error:     nil,
+				})
+			}
 		}
 
 		return nil

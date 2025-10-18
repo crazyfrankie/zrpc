@@ -21,6 +21,7 @@ import (
 	"github.com/crazyfrankie/zrpc/metadata"
 	"github.com/crazyfrankie/zrpc/protocol"
 	"github.com/crazyfrankie/zrpc/share"
+	"github.com/crazyfrankie/zrpc/stats"
 )
 
 const (
@@ -477,6 +478,17 @@ func (s *Server) serveRequest(ctx context.Context, req *protocol.Message, conn n
 	// inject metadata to context
 	ctx = metadata.NewInComingContext(ctx, req.Metadata)
 	
+	// Stats Handler - TagRPC
+	fullMethod := "/" + req.ServiceName + "/" + req.ServiceMethod
+	if len(s.opt.statsHandlers) > 0 {
+		for _, sh := range s.opt.statsHandlers {
+			ctx = sh.TagRPC(ctx, &stats.RPCTagInfo{
+				FullMethodName: fullMethod,
+				FailFast:       false,
+			})
+		}
+	}
+	
 	// Handle timeout from client
 	if req.Metadata != nil {
 		if timeoutStrs := req.Metadata.Get(protocol.TimeoutHeader); len(timeoutStrs) > 0 {
@@ -658,6 +670,18 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 	atomic.AddInt32(&s.handleMsgCount, 1)
 	defer atomic.AddInt32(&s.handleMsgCount, -1)
 
+	// Stats Handler - Begin
+	beginTime := time.Now()
+	if len(s.opt.statsHandlers) > 0 {
+		for _, sh := range s.opt.statsHandlers {
+			sh.HandleRPC(ctx, &stats.Begin{
+				Client:    false,
+				BeginTime: beginTime,
+				FailFast:  false,
+			})
+		}
+	}
+
 	// if heartbeat return directly
 	if req.IsHeartBeat() {
 		res := req.Clone()
@@ -695,8 +719,19 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 				return fmt.Errorf("zrpc: error unmarshalling request: %v", err)
 			}
 
-			// TODO
-			// StatsHandler
+			// Stats Handler - InPayload
+			if len(s.opt.statsHandlers) > 0 {
+				for _, sh := range s.opt.statsHandlers {
+					sh.HandleRPC(ctx, &stats.InPayload{
+						Client:     false,
+						Payload:    v,
+						Data:       req.Payload,
+						Length:     len(req.Payload),
+						WireLength: len(req.Payload),
+						RecvTime:   time.Now(),
+					})
+				}
+			}
 
 			return nil
 		}
@@ -708,6 +743,38 @@ func (s *Server) processOneRequest(ctx context.Context, req *protocol.Message, c
 		}
 		if err != nil {
 			zap.L().Error("zrpc: failed to handle request: ", zap.Error(err))
+		}
+	}
+
+	// Stats Handler - OutPayload (if there's a reply)
+	if reply != nil && len(s.opt.statsHandlers) > 0 {
+		// We need to marshal the reply to get the actual payload size
+		d, marshalErr := s.getCodec().Marshal(reply)
+		if marshalErr == nil {
+			payload := d.Materialize()
+			for _, sh := range s.opt.statsHandlers {
+				sh.HandleRPC(ctx, &stats.OutPayload{
+					Client:     false,
+					Payload:    reply,
+					Data:       payload,
+					Length:     len(payload),
+					WireLength: len(payload),
+					SentTime:   time.Now(),
+				})
+			}
+			d.Free()
+		}
+	}
+
+	// Stats Handler - End
+	if len(s.opt.statsHandlers) > 0 {
+		for _, sh := range s.opt.statsHandlers {
+			sh.HandleRPC(ctx, &stats.End{
+				Client:    false,
+				BeginTime: beginTime,
+				EndTime:   time.Now(),
+				Error:     err,
+			})
 		}
 	}
 

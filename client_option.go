@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/crazyfrankie/zrpc/discovery"
+	"github.com/crazyfrankie/zrpc/stats"
 )
 
 const (
@@ -56,6 +57,9 @@ type clientOption struct {
 	balancerMode     discovery.SelectMode
 	registryAddr     string   // TCP registry address
 	etcdEndpoints    []string // Etcd endpoints
+	
+	// Stats handlers for monitoring and tracing
+	statsHandlers []stats.Handler
 }
 
 func defaultClientOption() *clientOption {
@@ -182,5 +186,12 @@ func DialWithRegistryAddress(addr string) ClientOption {
 func DialWithEtcdEndpoints(endpoints []string) ClientOption {
 	return func(opt *clientOption) {
 		opt.etcdEndpoints = endpoints
+	}
+}
+
+// DialWithStatsHandler adds a stats handler for RPC monitoring and tracing
+func DialWithStatsHandler(handler stats.Handler) ClientOption {
+	return func(opt *clientOption) {
+		opt.statsHandlers = append(opt.statsHandlers, handler)
 	}
 }
